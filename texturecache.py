@@ -3,7 +3,7 @@
 
 ################################################################################
 #
-#  Copyright (C) 2013 Neil MacLeod (texturecache@nmacleod.com)
+#  Copyright (C) 2013-present Neil MacLeod (texturecache@nmacleod.com)
 #
 #  This Program is free software; you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -52,13 +52,15 @@ if sys.version_info >= (3, 0):
 else:
   import ConfigParser, StringIO, httplib, urllib2, Queue
 
+lock = threading.RLock()
+
 #
 # Config class. Will be a global object.
 #
 class MyConfiguration(object):
   def __init__(self, argv):
 
-    self.VERSION = "2.2.0"
+    self.VERSION = "2.5.4"
 
     self.GITHUB = "https://raw.github.com/MilhouseVH/texturecache.py/master"
     self.ANALYTICS_GOOD = "http://goo.gl/BjH6Lj"
@@ -93,6 +95,10 @@ class MyConfiguration(object):
                                   "libshowdialogs":   (6, 19, 0),
                                   "exitcode":         (6, 21, 0),
                                   "refreshrefactor":  (6, 27, 0),
+                                  "votesnogrouping":  (7,  1, 0),
+                                  "playerprocessinfo":(7, 20, 0),
+                                  "codecinforemoved": (7, 21, 0),
+                                  "musichasart":      (9, 4,  2),
                                   "profiledirectory": (999, 99, 9)
                                  }
 
@@ -100,10 +106,10 @@ class MyConfiguration(object):
 
     namedSection = False
     serial_urls = "assets\.fanart\.tv"
-    embedded_urls = "^video, ^music"
+    embedded_urls = "^video, ^music, ^DefaultVideo.png"
 
     if MyUtility.isPython3:
-      config = ConfigParser.SafeConfigParser(strict=False)
+      config = ConfigParser.ConfigParser(strict=False)
     else:
       config = ConfigParser.SafeConfigParser()
     self.config = config
@@ -141,7 +147,10 @@ class MyConfiguration(object):
       cfg.write("\n")
 
     cfg.seek(0, os.SEEK_SET)
-    config.readfp(cfg)
+    if MyUtility.isPython3:
+      config.read_file(cfg)
+    else:
+      config.readfp(cfg)
 
     # If a specific section is not passed on the command line, check the config
     # to see if there is a default section property, and if not then default to
@@ -172,11 +181,11 @@ class MyConfiguration(object):
     if UD_SYS_DEFAULT is None: UD_SYS_DEFAULT = self.getdefaultuserdata("XBMC")
     if UD_SYS_DEFAULT is None: UD_SYS_DEFAULT = "~/userdata"
 
-    self.XBMC_BASE = os.path.expanduser(self.getValue(config, "userdata", UD_SYS_DEFAULT))
+    self.KODI_BASE = os.path.expanduser(self.getValue(config, "userdata", UD_SYS_DEFAULT))
     self.TEXTUREDB = self.getValue(config, "dbfile", "Database/Textures13.db")
     self.THUMBNAILS = self.getValue(config, "thumbnails", "Thumbnails")
 
-    self.CURRENT_PROFILE = {"name": "", "lockmode": 0, "thumbnail": ""} # Not yet known
+    self.CURRENT_PROFILE = {"label": "", "lockmode": 0, "thumbnail": "", "directory": "", "tc.profilepath": self.KODI_BASE} # Not yet known
     self.PROFILE_ENABLED = self.getBoolean(config, "profile.enabled", "yes")
     self.PROFILE_MASTER = self.getValue(config, "profile.master", "Master user")
     self.PROFILE_AUTOLOAD = self.getBoolean(config, "profile.autoload", "yes")
@@ -190,21 +199,26 @@ class MyConfiguration(object):
     if self.PROFILE_DIRECTORY == "" and self.PROFILE_NAME != self.PROFILE_MASTER:
       self.PROFILE_DIRECTORY = self.PROFILE_NAME
 
+    if self.PROFILE_DIRECTORY != "":
+      self.PROFILE_DIRECTORY = os.path.join("profiles", self.PROFILE_DIRECTORY)
+
     # Read library and textures data in chunks to minimise server/client memory usage
     self.CHUNKED = self.getBoolean(config, "chunked", "yes")
 
     self.DBJSON = self.getValue(config, "dbjson", "auto")
     self.USEJSONDB = self.getBoolean(config, "dbjson", "yes")
 
-    if self.XBMC_BASE[-1:] not in ["/", "\\"]: self.XBMC_BASE += "/"
+    if self.KODI_BASE[-1:] not in ["/", "\\"]: self.KODI_BASE += "/"
     if self.THUMBNAILS[-1:] not in ["/", "\\"]: self.THUMBNAILS += "/"
 
-    self.XBMC_BASE = self.XBMC_BASE.replace("/", os.sep)
+    self.KODI_BASE = self.KODI_BASE.replace("/", os.sep)
     self.TEXTUREDB = self.TEXTUREDB.replace("/", os.sep)
     self.THUMBNAILS = self.THUMBNAILS.replace("/", os.sep)
     self.HAS_THUMBNAILS_FS = os.path.exists(self.getFilePath())
 
-    self.XBMC_HOST = self.getValue(config, "xbmc.host", "localhost")
+    self.KODI_HOST = self.getValue(config, "xbmc.host", None, True)
+    if self.KODI_HOST is None:
+      self.KODI_HOST = self.getValue(config, "kodi.host", "localhost")
     self.WEB_PORT = self.getValue(config, "webserver.port", "8080")
     self.WEB_SINGLESHOT = self.getBoolean(config, "webserver.singleshot", "no")
     self.RPC_PORT = self.getValue(config, "rpc.port", "9090")
@@ -223,8 +237,8 @@ class MyConfiguration(object):
 
     if (web_user and web_pass):
       token = "%s:%s" % (web_user, web_pass)
-      if sys.version_info >= (3, 0):
-        self.WEB_AUTH_TOKEN = base64.encodestring(bytes(token, "utf-8")).decode()
+      if MyUtility.isPython3:
+        self.WEB_AUTH_TOKEN = base64.encodebytes(bytes(token, "utf-8")).decode()
       else:
         self.WEB_AUTH_TOKEN = base64.encodestring(token)
       self.WEB_AUTH_TOKEN = self.WEB_AUTH_TOKEN.replace("\n", "")
@@ -244,7 +258,7 @@ class MyConfiguration(object):
     self.DOWNLOAD_PAYLOAD = self.getBoolean(config, "download.payload","yes")
 
     self.DOWNLOAD_THREADS = {}
-    for x in ["addons", "albums", "artists", "songs", "movies", "sets", "tags", "tvshows", "pvr.tv", "pvr.radio"]:
+    for x in ["addons", "albums", "artists", "songs", "movies", "sets", "tags", "tvshows", "musicvideos", "pvr.tv", "pvr.radio"]:
       temp = int(self.getValue(config, "download.threads.%s" % x, self.DOWNLOAD_THREADS_DEFAULT))
       self.DOWNLOAD_THREADS["download.threads.%s" % x] = temp
 
@@ -306,7 +320,7 @@ class MyConfiguration(object):
 
     self.QAPERIOD = int(self.getValue(config, "qaperiod", "30"))
     adate = datetime.date.today() - datetime.timedelta(days=self.QAPERIOD)
-    self.QADATE = adate.strftime("%Y-%m-%d")
+    self.QADATE = adate.strftime("%Y-%m-%d") if self.QAPERIOD >= 0 else None
 
     self.QA_FILE = self.getBoolean(config, "qa.file", "no")
     self.QA_FAIL_CHECKEXISTS = self.getBoolean(config, "qa.fail.checkexists", "yes")
@@ -337,6 +351,8 @@ class MyConfiguration(object):
     self.CACHE_IGNORE_TYPES = self.getPatternFromList(config, "cache.ignore.types", embedded_urls, allowundefined=True)
     self.PRUNE_RETAIN_TYPES = self.getPatternFromList(config, "prune.retain.types", "")
 
+    self.CACHE_DROP_INVALID_FILE = self.getValue(config, "cache.dropfile", "")
+
     # Fix patterns as we now strip image:// from the URLs, so we need to remove
     # this prefix from any legacy patterns that may be specified by the user
     for index, r in enumerate(self.CACHE_IGNORE_TYPES):
@@ -347,6 +363,8 @@ class MyConfiguration(object):
     self.PRUNE_RETAIN_PREVIEWS = self.getBoolean(config, "prune.retain.previews", "yes")
     self.PRUNE_RETAIN_PICTURES = self.getBoolean(config, "prune.retain.pictures", "no")
     self.PRUNE_RETAIN_CHAPTERS = self.getBoolean(config, "prune.retain.chapters", "yes")
+
+    self.MISSING_IGNORE_PATTERNS = self.getPatternFromList(config, "missing.ignore.patterns", "", allowundefined=True)
 
     self.picture_filetypes    = m_pictureExtensions.split("|")
     self.PICTURE_FILETYPES_EX = self.getFileExtList(config, "picture.filetypes", "")
@@ -389,11 +407,15 @@ class MyConfiguration(object):
 
     self.PURGE_MIN_LEN = int(self.getValue(config, "purge.minlen", "5"))
 
+    self.OMDB_API_KEY = self.getValue(config, "omdb.apikey", None, True)
+
     self.IMDB_FIELDS_MOVIES = self.getExRepList(config, "imdb.fields.movies", ["rating", "votes", "top250"], True)
     self.IMDB_FIELDS_TVSHOWS = self.getExRepList(config, "imdb.fields.tvshows", ["rating", "votes"], True)
     self.IMDB_IGNORE_TVTITLES = self.getSimpleList(config, "imdb.ignore.tvtitles", "", True, "|")
+    self.IMDB_MAP_TVTITLES = self.getSimpleList(config, "imdb.map.tvtitles", "", True, "|")
     self.IMDB_TRANSLATE_TVTITLES = self.getSimpleList(config, "imdb.translate.tvtitles", "", True, "|", False)
     self.IMDB_TRANSLATE_TVYEARS = self.getSimpleList(config, "imdb.translate.tvyears", "", True, "|")
+    self.IMDB_IGNORE_MISSING_EPISODES = self.getBoolean(config, "imdb.ignore.missing.episodes", "no")
     self.IMDB_THREADS = int(self.getValue(config, "imdb.threads", 10))
     self.IMDB_THREADS = 1 if self.IMDB_THREADS < 1 else self.IMDB_THREADS
     self.IMDB_THREADS = 20 if self.IMDB_THREADS > 20 else self.IMDB_THREADS
@@ -436,6 +458,10 @@ class MyConfiguration(object):
 
     self.CLEAN_SHOW_DIALOGS = self.getBoolean(config, "clean.showdialogs", "no")
     self.SCAN_SHOW_DIALOGS = self.getBoolean(config, "scan.showdialogs", "no")
+
+    self.LOG_REPLAY_FILENAME = self.getValue(config, "replayfile", "")
+    self.log_replay_fmap = {}
+    self.log_replay_tmap = {}
 
   def getdefaultuserdata(self, appid):
     atv2_path     = "/User/Library/Preferences/%s/userdata" % appid
@@ -513,6 +539,12 @@ class MyConfiguration(object):
 
     # Support profile switching?
     self.JSON_HAS_PROFILE_SUPPORT = self.HasJSONCapability("profilesupport")
+
+    #https://github.com/xbmc/xbmc/pull/8080
+    self.JSON_VOTES_HAVE_NO_GROUPING = self.HasJSONCapability("votesnogrouping")
+
+    self.JSON_PLAYER_PROCESS_INFO = self.HasJSONCapability("playerprocessinfo")
+    self.JSON_CODEC_INFO_REMOVED = self.HasJSONCapability("codecinforemoved")
 
     # https://github.com/xbmc/xbmc/pull/8196
     self.JSON_HAS_PROFILE_DIRECTORY = self.HasJSONCapability("profiledirectory")
@@ -692,18 +724,14 @@ class MyConfiguration(object):
   def getFilePath(self, filename=""):
     if os.path.isabs(self.THUMBNAILS):
       return os.path.join(self.THUMBNAILS, filename)
-    elif self.PROFILE_DIRECTORY != "":
-      return os.path.join(self.XBMC_BASE, "profiles", self.PROFILE_DIRECTORY, self.THUMBNAILS, filename)
     else:
-      return os.path.join(self.XBMC_BASE, self.THUMBNAILS, filename)
+      return os.path.join(self.CURRENT_PROFILE["tc.profilepath"], self.THUMBNAILS, filename)
 
   def getDBPath(self):
     if os.path.isabs(self.TEXTUREDB):
       return self.TEXTUREDB
-    elif self.PROFILE_DIRECTORY != "":
-      return os.path.join(self.XBMC_BASE, "profiles", self.PROFILE_DIRECTORY, self.TEXTUREDB)
     else:
-      return os.path.join(self.XBMC_BASE, self.TEXTUREDB)
+      return os.path.join(self.CURRENT_PROFILE["tc.profilepath"], self.TEXTUREDB)
 
   def NoneIsBlank(self, x):
     return x if x else ""
@@ -741,10 +769,10 @@ class MyConfiguration(object):
     print("Current properties (if exists, read from %s):" % (self.FILENAME))
     print("")
     print("  sep = %s" % self.FSEP)
-    print("  userdata = %s " % self.XBMC_BASE)
+    print("  userdata = %s " % self.KODI_BASE)
     print("  dbfile = %s" % self.TEXTUREDB)
     print("  thumbnails = %s " % self.THUMBNAILS)
-    print("  xbmc.host = %s" % self.XBMC_HOST)
+    print("  kodi.host = %s" % self.KODI_HOST)
     print("  webserver.port = %s" % self.WEB_PORT)
     print("  webserver.ctimeout = %s" % self.NoneIsBlank(self.WEB_CONNECTTIMEOUT))
     print("  rpc.port = %s" % self.RPC_PORT)
@@ -798,10 +826,12 @@ class MyConfiguration(object):
     print("  cache.extrathumbs = %s" % self.BooleanIsYesNo(self.CACHE_EXTRA_THUMBS))
     print("  cache.videoextras = %s" % self.BooleanIsYesNo(self.CACHE_VIDEO_EXTRAS))
     print("  cache.refresh = %s%s" % (self.NoneIsBlank(self.CACHE_REFRESH), " (%s)" % self.cache_refresh_date_fmt if self.cache_refresh_date_fmt else ""))
+    print("  cache.dropfile = %s" % self.NoneIsBlank(self.CACHE_DROP_INVALID_FILE))
     print("  prune.retain.types = %s" % self.NoneIsBlank(self.getListFromPattern(self.PRUNE_RETAIN_TYPES)))
     print("  prune.retain.previews = %s" % self.BooleanIsYesNo(self.PRUNE_RETAIN_PREVIEWS))
     print("  prune.retain.pictures = %s" % self.BooleanIsYesNo(self.PRUNE_RETAIN_PICTURES))
     print("  prune.retain.chapters = %s" % self.BooleanIsYesNo(self.PRUNE_RETAIN_CHAPTERS))
+    print("  missing.ignore.patterns = %s" % self.NoneIsBlank(self.getListFromPattern(self.MISSING_IGNORE_PATTERNS)))
     print("  logfile = %s" % self.NoneIsBlank(self.LOGFILE))
     print("  logfile.verbose = %s" % self.BooleanIsYesNo(self.LOGVERBOSE))
     print("  logfile.unique = %s" % self.BooleanIsYesNo(self.LOGUNIQUE))
@@ -820,11 +850,13 @@ class MyConfiguration(object):
     print("  subtitle.filetypes = %s" % self.NoneIsBlank(", ".join(self.SUBTITLE_FILETYPES_EX)))
     print("  watched.overwrite = %s" % self.BooleanIsYesNo(self.WATCHEDOVERWRITE))
     print("  network.mac = %s" % self.NoneIsBlank(self.MAC_ADDRESS))
-    print("  imdb.fields.movie = %s" % self.NoneIsBlank(", ".join(self.IMDB_FIELDS_MOVIES)))
+    print("  imdb.fields.movies = %s" % self.NoneIsBlank(", ".join(self.IMDB_FIELDS_MOVIES)))
     print("  imdb.fields.tvshows = %s" % self.NoneIsBlank(", ".join(self.IMDB_FIELDS_TVSHOWS)))
     print("  imdb.ignore.tvtitles = %s" % self.NoneIsBlank("|".join(self.IMDB_IGNORE_TVTITLES)))
+    print("  imdb.map.tvtitles = %s" % self.NoneIsBlank("|".join(self.IMDB_MAP_TVTITLES)))
     print("  imdb.translate.tvtitles = %s" % self.NoneIsBlank("|".join(self.IMDB_TRANSLATE_TVTITLES)))
     print("  imdb.translate.tvyears = %s" % self.NoneIsBlank("|".join(self.IMDB_TRANSLATE_TVYEARS)))
+    print("  imdb.ignore.missing.episodes = %s" % self.BooleanIsYesNo(self.IMDB_IGNORE_MISSING_EPISODES))
     print("  imdb.threads = %s" % self.IMDB_THREADS)
     print("  imdb.timeout = %s" % self.NoneIsBlank(self.IMDB_TIMEOUT))
     print("  imdb.retry = %s" % self.IMDB_RETRY)
@@ -880,10 +912,13 @@ class MyLogger():
     self.DEBUG = False
     self.VERBOSE = False
 
-    self.ISATTY = sys.stdout.isatty()
+    try:
+      self.ISATTY = sys.stdout.isatty()
+    except:
+      self.ISATTY = False
 
     #Ensure stdout/stderr use utf-8 encoding...
-    if sys.version_info >= (3, 1):
+    if MyUtility.isPython3_1:
       sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
       sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
     else:
@@ -894,7 +929,7 @@ class MyLogger():
     if self.LOGFILE: self.LOGFILE.close()
 
   def setLogFile(self, config=None):
-    with threading.Lock():
+    with lock:
       if config and config.LOGFILE:
         if not self.LOGGING:
           filename = config.LOGFILE
@@ -916,7 +951,7 @@ class MyLogger():
           self.LOGFILE = None
 
   def progress(self, data, every=0, finalItem=False, newLine=False, noBlank=False):
-    with threading.Lock():
+    with lock:
       if every != 0 and not finalItem:
         self.now += 1
         if self.now != 1:
@@ -942,7 +977,7 @@ class MyLogger():
     self.now = initialValue
 
   def out(self, data, newLine=False, log=False, padspaces=True):
-    with threading.Lock():
+    with lock:
       udata = MyUtility.toUnicode(data)
       ulen = len(data)
       spaces = self.lastlen - ulen
@@ -969,7 +1004,7 @@ class MyLogger():
     if log: self.log(data)
 
   def debug(self, data, jsonrequest=None):
-    with threading.Lock():
+    with lock:
       if self.DEBUG:
         if self.ISATTY:
           self.out("%s: [%s] %s" % (datetime.datetime.now(), self.OPTION, data), newLine=True)
@@ -980,7 +1015,7 @@ class MyLogger():
 
   def log(self, data, jsonrequest=None, maxLen=0):
     if self.LOGGING:
-      with threading.Lock():
+      with lock:
         udata = MyUtility.toUnicode(data)
 
         t = threading.current_thread().name
@@ -1000,7 +1035,7 @@ class MyLogger():
   # creation of additional temporary buffers through concatenation.
   def log2(self, prefix, udata, jsonrequest=None, maxLen=0):
     if self.LOGGING:
-      with threading.Lock():
+      with lock:
         t = threading.current_thread().name
         self.LOGFILE.write("%s:%-10s: %s" % (datetime.datetime.now(), t, prefix))
 
@@ -1022,7 +1057,7 @@ class MyLogger():
         if self.DEBUG or self.LOGFLUSH: self.LOGFILE.flush()
 
   def err(self, data, newLine=False, log=False):
-    with threading.Lock():
+    with lock:
       self.progress("")
       udata = MyUtility.toUnicode(data)
       if newLine:
@@ -1076,6 +1111,9 @@ class MyImageLoader(threading.Thread):
         except Queue.Empty:
           break
 
+        except IOEndOfReplayLog:
+          break
+
     self.totals.stop()
     self.complete_queue.put(None)
 
@@ -1096,7 +1134,7 @@ class MyImageLoader(threading.Thread):
         self.database.deleteItem(item.dbid, None)
         rowexists = False
 
-    # If PRIME is enabled, request the remote URL directly. If not available, don't bother
+    # If DOWNLOAD_PRIME is enabled, request the remote URL directly. If not available, don't bother
     # retrying call to Files.PrepareDownload as it will surely fail.
     if PDRETRY > 0 and url is None and self.config.DOWNLOAD_PRIME:
       isAvailable = self.prime_the_request(item.decoded_filename)
@@ -1106,7 +1144,8 @@ class MyImageLoader(threading.Thread):
     # Retry call to Files.PrepareDownload - hopefully it will succeed eventually...
     while PDRETRY > 0 and url is None and isAvailable:
       self.logger.log("Retrying getDownloadURL(), %d attempts remaining" % PDRETRY)
-      time.sleep(0.5)
+      # Introduce a short delay, unless we're playing back a log file...
+      if self.json.LOG_REPLAYFILE is None: time.sleep(0.5)
       PDRETRY -= 1
       url = self.json.getDownloadURL(item.filename)
 
@@ -1115,23 +1154,26 @@ class MyImageLoader(threading.Thread):
   # Directly request the remote URL returning True if still available
   def prime_the_request(self, url):
     if url is None: return False
-    if not url.startswith("http://"): return True
 
-    domain = url.replace("http://", "").split("/")[0]
-    page = "/" + "/".join(url.replace("http://", "").split("/")[1:])
+    if url.startswith("http://"):
+      domain = url.replace("http://", "").split("/")[0]
+      page = "/" + "/".join(url.replace("http://", "").split("/")[1:])
+      issecure = False
+    elif url.startswith("https://"):
+      domain = url.replace("https://", "").split("/")[0]
+      page = "/" + "/".join(url.replace("https://", "").split("/")[1:])
+      issecure = True
+    else:
+      return True
 
-    conn = None
     isAvailable = True
     try:
-      conn = httplib.HTTPConnection(domain)
-      conn.request("GET", page, headers={"User-agent": "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:38.0) Gecko/20100101 Firefox/38.0"})
-      resp = conn.getresponse()
-      payload = resp.read(1)
-      self.logger.log("Primed request of: Domain [%s] with URL [%s], result [%d, %s]" % (domain, page, resp.status, resp.reason))
-      isAvailable = (resp.status == 200 or 300 <= resp.status < 400)
+      PAYLOAD = self.json.sendWeb("GET", page, "primeImage", headers={"User-agent": "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:38.0) Gecko/20100101 Firefox/38.0"}, \
+                                  readAmount=1024, rawData=True, domain=domain, useSSL=issecure)
+      self.logger.log("Primed request of: HTTPS=%s, Domain [%s] with URL [%s], result [%d, %s]" % (issecure, domain, page, self.json.WEB_LAST_STATUS, self.json.WEB_LAST_REASON))
+      isAvailable = (self.json.WEB_LAST_STATUS == 200 or 300 <= self.json.WEB_LAST_STATUS < 400)
     except:
       isAvailable = False
-    if conn is not None: conn.close()
 
     return isAvailable
 
@@ -1161,7 +1203,7 @@ class MyImageLoader(threading.Thread):
     while ATTEMPT > 0 and (self.config.DOWNLOAD_PAYLOAD or PERFORM_DOWNLOAD):
       try:
         # Don't need to download the whole image for it to be cached so just grab the first 1KB
-        PAYLOAD = self.json.sendWeb("GET", url, readAmount=1024, rawData=True)
+        PAYLOAD = self.json.sendWeb("GET", url, "loadImage", readAmount=1024, rawData=True)
         if self.json.WEB_LAST_STATUS == httplib.OK:
           self.logger.log("Successfully downloaded image with size [%d] bytes, attempts required [%d], filename [%s]" \
                         % (len(PAYLOAD), (self.retry - ATTEMPT + 1), item.decoded_filename))
@@ -1206,8 +1248,11 @@ class MyIMDBLoader(threading.Thread):
     # Avoid querying OMDb if we're only updating fields available from Top250 movie list
     self.onlyt250fields = (set(imdbfields).issubset(["top250", "rating", "votes"]))
 
+    self.ignore_missing_episodes = config.IMDB_IGNORE_MISSING_EPISODES
+
     self.timeout = self.config.IMDB_TIMEOUT
     self.retry = self.config.IMDB_RETRY
+    self.apikey = self.config.OMDB_API_KEY
 
   def run(self):
     while not stopped.is_set():
@@ -1217,10 +1262,13 @@ class MyIMDBLoader(threading.Thread):
 
         item = qItem["item"]
 
-        imdbnumber = item.get("imdbnumber", "")
+        imdbnumber = item.get("imdbnumber", None)
+
         title = item.get("title", item["label"])
         original_title = qItem.get("OriginalShowTitle", title)
         year = item.get("year", None)
+
+        multipart_ep = qItem.get("multipart_ep", None) # (season#, episode#) of first episode in a multipart episode
 
         showTitle = title
         showYear = year
@@ -1256,19 +1304,30 @@ class MyIMDBLoader(threading.Thread):
         if self.omdbquery and needomdb:
           attempt = 0
           newimdb = None
+          ismultipartquery = False
           while True:
             if isMovie:
-              self.logger.log("Querying omdbapi.com[a=%d, r=%d]: [movie] %s (%s)" % (attempt, self.retry, imdbnumber, title))
-              newimdb = MyUtility.getIMDBInfo(imdbnumber=imdbnumber, plotFull=self.plotFull, plotOutline=self.plotOutline, qtimeout=self.timeout) if imdbnumber else None
+              self.logger.log("Querying OMDb [a=%d, r=%d]: [movie] %s, imdb=%s" % (attempt, self.retry, imdbnumber, title))
+              newimdb = MyUtility.getIMDBInfo("movie", self.apikey, imdbnumber=imdbnumber, plotFull=self.plotFull, plotOutline=self.plotOutline, qtimeout=self.timeout) if imdbnumber else None
             elif isTVShow:
-              self.logger.log("Querying omdbapi.com[a=%d, r=%d]: [tvshow] %s, %d" % (attempt, self.retry, title, year))
-              newimdb = MyUtility.getIMDBInfo(title=title, year=year, plotFull=self.plotFull, plotOutline=self.plotOutline, qtimeout=self.timeout)
+              self.logger.log("Querying OMDb [a=%d, r=%d]: [tvshow] %s, %d, imdb=%s" % (attempt, self.retry, title, year, MyUtility.nonestr(imdbnumber)))
+              newimdb = MyUtility.getIMDBInfo("tvshow", self.apikey, imdbnumber=imdbnumber, title=title, year=year, plotFull=self.plotFull, plotOutline=self.plotOutline, qtimeout=self.timeout)
             elif isEpisode:
-              self.logger.log("Querying omdbapi.com[a=%d, r=%d]: [episode] %s, %d, S%02d, E%02d" % (attempt, self.retry, show_title, show_year, season, episode))
-              newimdb = MyUtility.getIMDBInfo(title=show_title, year=show_year, season=season, episode=episode, plotFull=self.plotFull, plotOutline=self.plotOutline, qtimeout=self.timeout)
+              self.logger.log("Querying OMDb [a=%d, r=%d]: [episode] %s, %d, S%02d, E%02d, imdb=%s" % (attempt, self.retry, show_title, show_year, season, episode, MyUtility.nonestr(imdbnumber)))
+              newimdb = MyUtility.getIMDBInfo("episode", self.apikey, imdbnumber=imdbnumber, title=show_title, year=show_year, season=season, episode=episode,
+                                              plotFull=(self.plotFull and not ismultipartquery), plotOutline=(self.plotOutline and not ismultipartquery), qtimeout=self.timeout)
 
             if newimdb is not None:
               newimdb = newimdb if newimdb.get("response", "False") == "True" else None
+
+              # If nothing found and it's a multipart episode that hasn't already been re-queried, then
+              # try querying omdbapi again using the first episode of the multipart sequence (ignoring plot details)
+              if newimdb is None and multipart_ep is not None and not ismultipartquery:
+                ismultipartquery = True
+                self.logger.log("Re-querying OMDb [a=%d, r=%d]: [multipart] %s, %d, S%02d, E%02d => S%02d, E%02d" %
+                                (attempt, self.retry, show_title, show_year, season, episode, multipart_ep[0], multipart_ep[1]))
+                (season, episode) = multipart_ep
+                continue
               break
             elif attempt >= self.retry:
               break
@@ -1277,14 +1336,20 @@ class MyIMDBLoader(threading.Thread):
 
           if newimdb is None:
             if isMovie:
-              self.logger.err("Could not obtain OMDb details for [movie] %s (%s)" % (imdbnumber, original_title), newLine=True, log=True)
+              logmsg = "Could not obtain OMDb details for [movie] %s (%s)" % (imdbnumber, original_title)
             elif isTVShow:
-              self.logger.err("Could not obtain OMDb details for [tvshow] %s (%d)" % (original_title, year), newLine=True, log=True)
+              logmsg = "Could not obtain OMDb details for [tvshow] %s (%d)" % (original_title, year)
             elif isEpisode:
-              self.logger.err("Could not obtain OMDb details for [episode] %s S%02dE%02d" % (original_title, season, episode), newLine=True, log=True)
+              logmsg = "Could not obtain OMDb details for [episode] %s S%02dE%02d" % (original_title, season, episode)
+
+            if isEpisode and self.ignore_missing_episodes:
+              self.logger.log(logmsg)
+            else:
+              self.logger.err(logmsg, newLine=True, log=True)
+
             continue
         else:
-          self.logger.log("Avoided omdbapi.com query, movies250 has all we need: %s (%s)" % (imdbnumber, original_title))
+          self.logger.log("Avoided OMDb query, movies250 has all we need: %s (%s)" % (imdbnumber, original_title))
           newimdb = {}
 
         # Add top250 only if we've got a 250 list
@@ -1345,11 +1410,11 @@ class MyHDMIManager(threading.Thread):
 
   def run(self):
     try:
-      self.MonitorXBMC()
+      self.MonitorKodi()
     except:
       pass
 
-  def MonitorXBMC(self):
+  def MonitorKodi(self):
     clientState = {}
     hdmi_on = True
 
@@ -1377,7 +1442,7 @@ class MyHDMIManager(threading.Thread):
           self.logger.debug("Connected to Kodi")
           self.logger.debug("HDMI power management thread - initialising Kodi and HDMI state")
 
-          clientState = self.getXBMCStatus()
+          clientState = self.getKodiStatus()
           hdmi_on = self.getHDMIState()
 
           screensaver_active = clientState["screensaver.active"]
@@ -1430,7 +1495,7 @@ class MyHDMIManager(threading.Thread):
             else:
               hdmi_on = self.enable_hdmi()
               if not self.candisable:
-                self.sendXBMCExit()
+                self.sendKodiExit()
 
         elif method == "Player.OnStop":
           self.EventSet(self.EV_PLAY_STOP)
@@ -1550,12 +1615,12 @@ class MyHDMIManager(threading.Thread):
     for event in self.events:
       self.EventStop(event)
 
-  def sendXBMCExit(self):
+  def sendKodiExit(self):
     self.logger.debug("Sending Application.Quit() to Kodi")
     REQUEST = {"method": "Application.Quit"}
     MyJSONComms(self.config, self.logger).sendJSON(REQUEST, "libExit", checkResult=False)
 
-  def getXBMCStatus(self):
+  def getKodiStatus(self):
     jcomms = MyJSONComms(self.config, self.logger)
 
     statuses = {}
@@ -1916,6 +1981,13 @@ class MyDB(object):
     else:
       return "WHERE cachedurl LIKE '%s/%%'" % folder
 
+# Raise this exception when we run out of replay log input
+class IOEndOfReplayLog(Exception):
+  def __init__(self, value):
+    self.value = value
+  def __str__(self):
+    return repr(self.value)
+
 #
 # Handle all JSON RPC communication.
 #
@@ -1931,11 +2003,16 @@ class MyJSONComms(object):
     self.mysocket = None
     self.myweb = None
     self.WEB_LAST_STATUS = -1
+    self.WEB_LAST_REASON = ""
     self.config.WEB_SINGLESHOT = True
     self.aUpdateCount = self.vUpdateCount = 0
     self.jcomms2 = None
 
+    self.BUFFER_SIZE = 32768
+
     self.QUIT_METHOD = self.QUIT_PARAMS = None
+
+    self.LOG_REPLAYFILE = None
 
   def __enter__(self):
     return self
@@ -1960,7 +2037,7 @@ class MyJSONComms(object):
         try:
           self.mysocket = socket.socket(ipversion, socket.SOCK_STREAM)
           self.mysocket.settimeout(self.connecttimeout)
-          self.mysocket.connect((self.config.XBMC_HOST, int(self.config.RPC_PORT)))
+          self.mysocket.connect((self.config.KODI_HOST, int(self.config.RPC_PORT)))
           self.mysocket.settimeout(None)
           self.logger.log("RPC connection established with IPv%s" % ("4" if ipversion == socket.AF_INET else "6"))
           self.config.RPC_IPVERSION = "4" if ipversion == socket.AF_INET else "6"
@@ -1984,49 +2061,164 @@ class MyJSONComms(object):
   def getWeb(self):
     if not self.myweb or self.config.WEB_SINGLESHOT:
       if self.myweb: self.myweb.close()
-      self.myweb = httplib.HTTPConnection("%s:%s" % (self.config.XBMC_HOST, self.config.WEB_PORT), timeout=self.connecttimeout)
+      self.myweb = httplib.HTTPConnection("%s:%s" % (self.config.KODI_HOST, self.config.WEB_PORT), timeout=self.connecttimeout)
       self.WEB_LAST_STATUS = -1
+      self.WEB_LAST_REASON = ""
       if self.config.DEBUG: self.myweb.set_debuglevel(1)
     return self.myweb
 
-  def sendWeb(self, request_type, url, request=None, headers={}, readAmount=0, timeout=15.0, rawData=False):
-    if self.config.WEB_AUTH_TOKEN:
-      headers.update({"Authorization": "Basic %s" % self.config.WEB_AUTH_TOKEN})
-
-    web = self.getWeb()
-
-    web.request(request_type, url, request, headers)
-
-    if timeout is None: web.sock.setblocking(1)
-    else: web.sock.settimeout(timeout)
-
+  def logreplay_open(self):
     try:
-      response = web.getresponse()
-      self.WEB_LAST_STATUS = response.status
-      if self.WEB_LAST_STATUS == httplib.UNAUTHORIZED:
-        raise httplib.HTTPException("Remote web host requires webserver.username/webserver.password properties")
-      if sys.version_info >= (3, 0) and not rawData:
-        if readAmount == 0: return response.read().decode("utf-8")
-        else: return response.read(readAmount).decode("utf-8")
+      thread = threading.current_thread().name
+      if thread not in self.config.log_replay_fmap:
+        self.LOG_REPLAYFILE = codecs.open(self.config.LOG_REPLAY_FILENAME, "r", encoding="utf-8")
+        self.config.log_replay_fmap[thread] = self.LOG_REPLAYFILE
       else:
-        if readAmount == 0: return response.read()
-        else: return response.read(readAmount)
-    except socket.timeout:
-      self.logger.log("** iotimeout occurred during web request **")
-      self.WEB_LAST_STATUS = httplib.REQUEST_TIMEOUT
-      self.myweb.close()
-      self.myweb = None
-      return ""
+        self.LOG_REPLAYFILE = self.config.log_replay_fmap[thread]
+      self.logreplay_mapthread(None)
     except:
-      if self.config.WEB_SINGLESHOT == False:
-        self.logger.log("SWITCHING TO WEBSERVER.SINGLESHOT MODE")
-        self.config.WEB_SINGLESHOT = True
-        return self.sendWeb(request_type, url, request, headers, readAmount, timeout, rawData)
-      raise
+      self.logger.err("ERROR: Unable to open replay file [%s] - exiting" % self.config.LOG_REPLAY_FILENAME, newLine=True, log=True)
+      sys.exit(2)
+
+  # When replaying muti-threaded input, map each new thread of input data to the
+  # currently available threads. Once a thread is allocated a thread from the data,
+  # it will only process data for that thread.
+  def logreplay_mapthread(self, map_to_thread=None):
+    thread = threading.current_thread().name
+
+    if map_to_thread is None: # process data for all threads
+      tpattern = thread if thread == "MainThread" else "Thread-[0-9]*"
+    else: # process data for a specific thread
+      tpattern = map_to_thread
+      self.config.log_replay_tmap[map_to_thread] = thread
+
+    self.web_re_result = re.compile("^.*:(%s)[ ]*: .*\.RECEIVED WEB DATA: ([0-9]*), (.*), (.*)$" % tpattern)
+    self.json_re_result = re.compile("^.*:(%s)[ ]*: .*\.PARSING JSON DATA: (.*)$" % tpattern)
+
+  # If the thread data being processed is mapped to a thread other than the current
+  # thread then ignore this thread data
+  def logreplay_ignore_thread(self, map_to_thread):
+    with lock:
+      thread = threading.current_thread().name
+
+      if map_to_thread in self.config.log_replay_tmap:
+         return self.config.log_replay_tmap[map_to_thread] != thread
+
+      self.logreplay_mapthread(map_to_thread)
+      return False
+
+  # Read responses from log, use in place of actual socket/web responses (requests are never made)
+  def logreplay(self, request, useWebServer):
+    if not self.LOG_REPLAYFILE:
+      self.logreplay_open()
+
+    while True:
+      line = self.LOG_REPLAYFILE.readline()
+      if not line: break
+
+      # Remove trailing newline and - if present, ie. Windows/DOS file format - carriage return
+      if len(line) != 0 and line[-1] in ["\n", "\r"]: line = line[0:-1]
+      if len(line) != 0 and line[-1] in ["\n", "\r"]: line = line[0:-1]
+
+      if useWebServer:
+        match = self.web_re_result.match(line)
+        if match and not self.logreplay_ignore_thread(match.group(1)):
+          self.WEB_LAST_STATUS = int(match.group(2))
+          self.WEB_LAST_REASON = match.group(3)
+          return match.group(4).encode("utf-8")
+      else:
+        match = self.json_re_result.match(line)
+        if match and not self.logreplay_ignore_thread(match.group(1)):
+          return match.group(2).encode("utf-8")
+
+    self.LOG_REPLAYFILE.close()
+    raise IOEndOfReplayLog("End of replay log data")
+
+  def sendWeb(self, request_type, url, id, request=None, headers={}, readAmount=0, timeout=15.0, rawData=False, domain=None, useSSL=False):
+    if request is not None:
+      sdata = json.dumps(request)
+      self.logger.log("%s.JSON WEB REQUEST: [%s] [%s]" % (id, request_type, sdata))
+    else:
+      sdata = None
+      if domain is not None:
+        self.logger.log("%s.DIRECT WEB REQUEST: [%s], HTTPS=%s, [%s] [%s]" % (id, request_type, useSSL, domain, url))
+      else:
+        self.logger.log("%s.DIRECT WEB REQUEST: [%s], [%s]" % (id, request_type, url))
+
+    if self.config.LOG_REPLAY_FILENAME:
+      data = self.logreplay(url, True)
+      data = "" if sdata and data == "<raw data>" else data
+      if MyUtility.isPython3 and not rawData:
+        data = data.decode("utf-8")
+    else:
+      if domain:
+        if useSSL:
+          web = httplib.HTTPSConnection(domain)
+        else:
+          web = httplib.HTTPConnection(domain)
+      else:
+        if self.config.WEB_AUTH_TOKEN:
+          headers.update({"Authorization": "Basic %s" % self.config.WEB_AUTH_TOKEN})
+        web = self.getWeb()
+
+      web.request(request_type, url, sdata, headers)
+
+      if timeout is None: web.sock.setblocking(1)
+      else: web.sock.settimeout(timeout)
+
+      data = ""
+
+      try:
+        response = web.getresponse()
+        self.WEB_LAST_STATUS = response.status
+        self.WEB_LAST_REASON = response.reason
+
+        if self.WEB_LAST_STATUS == httplib.UNAUTHORIZED:
+          raise httplib.HTTPException("Remote web host requires webserver.username/webserver.password properties")
+
+        if MyUtility.isPython3 and not rawData:
+          if readAmount == 0:
+            data = response.read().decode("utf-8")
+          else:
+            data = response.read(readAmount).decode("utf-8")
+        else:
+          if readAmount == 0:
+            data = response.read()
+          else:
+            data = response.read(readAmount)
+      except socket.timeout:
+        self.logger.log("** iotimeout occurred during web request **")
+        self.WEB_LAST_STATUS = httplib.REQUEST_TIMEOUT
+        self.WEB_LAST_REASON = "Request Timeout"
+        self.myweb.close()
+        self.myweb = None
+        data = ""
+      except:
+        if domain:
+          self.logger.log("%s.RECEIVED WEB DATA: %d, %s, <exception>" % (id, response.status, response.reason), maxLen=256)
+          raise
+        if self.config.WEB_SINGLESHOT == False:
+          self.logger.log("SWITCHING TO WEBSERVER.SINGLESHOT MODE")
+          self.config.WEB_SINGLESHOT = True
+          data = self.sendWeb(request_type, url, id, request, headers, readAmount, timeout, rawData)
+        else:
+          raise
+      finally:
+        if domain and web:
+          web.close()
+
+    if self.logger.LOGGING:
+      if rawData:
+        self.logger.log("%s.RECEIVED WEB DATA: %d, %s, <raw data>" % (id, self.WEB_LAST_STATUS, self.WEB_LAST_REASON), maxLen=256)
+      else:
+        self.logger.log("%s.RECEIVED WEB DATA: %d, %s, %s" % (id, self.WEB_LAST_STATUS, self.WEB_LAST_REASON, data), maxLen=256)
+
+    if sdata:
+      return json.loads(data) if data != "" else ""
+    else:
+      return data
 
   def sendJSON(self, request, id, callback=None, timeout=5.0, checkResult=True, useWebServer=False, ignoreSocketError=False):
-    BUFFER_SIZE = 32768
-
     request["jsonrpc"] = "2.0"
     request["id"] =  id
 
@@ -2035,20 +2227,19 @@ class MyJSONComms(object):
 
     # Following methods don't work over sockets - by design.
     if request["method"] in ["Files.PrepareDownload", "Files.Download"] or useWebServer:
-      self.logger.log("%s.JSON WEB REQUEST:" % id, jsonrequest=request)
-      data = self.sendWeb("POST", "/jsonrpc", json.dumps(request), {"Content-Type": "application/json"}, timeout=timeout)
-      if self.logger.LOGGING:
-        self.logger.log("%s.RECEIVED DATA: %s" % (id, data), maxLen=256)
-      return json.loads(data) if data != "" else ""
+      return self.sendWeb("POST", "/jsonrpc", id, request, {"Content-Type": "application/json"}, timeout=timeout)
 
-    s = self.getSocket()
     self.logger.log("%s.JSON SOCKET REQUEST:" % id, jsonrequest=request)
     START_IO_TIME = time.time()
 
-    if sys.version_info >= (3, 0):
-      s.send(bytes(json.dumps(request), "utf-8"))
+    if self.config.LOG_REPLAY_FILENAME:
+      jsocket = None
     else:
-      s.send(json.dumps(request))
+      jsocket = self.getSocket()
+      if MyUtility.isPython3:
+        jsocket.send(bytes(json.dumps(request), "utf-8"))
+      else:
+        jsocket.send(json.dumps(request))
 
     ENDOFDATA = True
     LASTIO = 0
@@ -2058,19 +2249,23 @@ class MyJSONComms(object):
     while True:
       if ENDOFDATA:
         ENDOFDATA = False
-        s.setblocking(1)
         data = b""
+        if jsocket: jsocket.setblocking(1)
 
       try:
-        newdata = s.recv(BUFFER_SIZE)
-        if len(data) == 0: s.settimeout(1.0)
+        if jsocket:
+          newdata = jsocket.recv(self.BUFFER_SIZE)
+          if len(data) == 0: jsocket.settimeout(1.0)
+        else:
+          newdata = self.logreplay(request, useWebServer)
+
         data += newdata
         LASTIO = time.time()
         self.logger.log("%s.BUFFER RECEIVED (len %d)" % (id, len(newdata)))
         if len(newdata) == 0: raise IOError("nodata")
         READ_ERR = False
 
-      except IOError as e:
+      except (IOError, IOEndOfReplayLog) as e:
         # Hack to exit monitor mode when socket dies
         if callback:
           jdata = {"jsonrpc":"2.0","method":"System.OnQuit","params":{"data":-1,"sender":"xbmc"}}
@@ -2105,7 +2300,10 @@ class MyJSONComms(object):
           messages = []
           for m in self.parseResponse(udata):
             if self.logger.LOGGING and messages == []:
-              self.logger.log2("%s.PARSING JSON DATA: " % id, udata, maxLen=256)
+              if udata.find("\n") != -1:
+                self.logger.log2("%s.PARSING JSON DATA: " % id, udata.replace("\t", "").replace("\n", ""), maxLen=256)
+              else:
+                self.logger.log2("%s.PARSING JSON DATA: " % id, udata, maxLen=256)
             messages.append(m)
 
           # Discard these buffers which could potentially be very large, as they're no longer required
@@ -2280,9 +2478,9 @@ class MyJSONComms(object):
         title = self.getTitleForLibraryItem(iType, libraryId)
 
         if title:
-          self.logger.out("Updating Library: New %-9s %5d [%s]\n" % (iType + "id", libraryId, title))
+          self.logger.out("Updating library: New %-9s %5d [%s]\n" % (iType + "id", libraryId, title))
         else:
-          self.logger.out("Updating Library: New %-9s %5d\n" % (iType + "id", libraryId))
+          self.logger.out("Updating library: New %-9s %5d\n" % (iType + "id", libraryId))
 
     return True if method.endswith("Library.OnScanFinished") else False
 
@@ -2303,7 +2501,7 @@ class MyJSONComms(object):
         if title:
           self.logger.out("Cleaning library: %-9s %5d [%s]\n" % (iType + "id", libraryId, title))
         else:
-          self.logger.out("Cleaning library: %-9s %5d [%s]\n" % (iType + "id", libraryId, title))
+          self.logger.out("Cleaning library: %-9s %5d\n" % (iType + "id", libraryId))
 
     return True if method.endswith("Library.OnCleanFinished") else False
 
@@ -2346,11 +2544,11 @@ class MyJSONComms(object):
     sources = self.getSources("video")
 
     for directory in sorted(workItems):
-      (mediatype, dpath) = directory.split(";")
+      (mediatype, dpath) = directory.split(";", 1)
       if dpath in sources: rootScan = True
 
     for directory in sorted(workItems):
-      (mediatype, dpath) = directory.split(";")
+      (mediatype, dpath) = directory.split(";", 1)
 
       for disc_folder in [".BDMV$", ".VIDEO_TS$"]:
         re_match = re.search(disc_folder, dpath, flags=re.IGNORECASE)
@@ -2386,7 +2584,7 @@ class MyJSONComms(object):
             REQUEST["params"]["refreshepisodes"] = False
         self.sendJSON(REQUEST, "lib%s" % method)
         if doRefresh:
-          gLogger.out("Updating Library: Refreshed %s %d [%s]" % (idName, libraryid, libraryitem["name"]), newLine=True)
+          gLogger.out("Updating library: Refreshed %s %d [%s]" % (idName, libraryid, libraryitem["name"]), newLine=True)
 
       if not doRefresh and not rootScan: self.scanDirectory(scanMethod, path=dpath)
 
@@ -2415,7 +2613,7 @@ class MyJSONComms(object):
 
     self.sendJSON(REQUEST, "libClean", callback=self.jsonWaitForCleanFinished, checkResult=False)
 
-  def getDirectoryList(self, path, mediatype="files", properties=["file","lastmodified"], use_cache=True, timestamp=False):
+  def getDirectoryList(self, path, mediatype="files", properties=["file","lastmodified"], use_cache=True, timestamp=False, honour_nomedia=False):
     data = MyUtility.getDirectoryCacheItem(properties, path)
 
     if not data:
@@ -2436,14 +2634,22 @@ class MyJSONComms(object):
             # Real directories won't have extensions, but .m3u and .pls playlists will
             # leading to infinite recursion, so fix the filetype so as not to try and
             # traverse playlists.
-            if f["filetype"] == "directory" and os.path.splitext(f["file"])[1] != "":
-              f["filetype"] = "file"
+            if f["filetype"] == "directory":
+              extension = os.path.splitext(f["file"])[1]
+              if extension and extension.find("/") != -1 and extension.find("\\") != -1:
+                f["filetype"] = "file"
 
             # Convert last modified date/time to epoch
             if timestamp: self.setTimeStamp(f)
 
       if use_cache:
         MyUtility.setDirectoryCacheItem(data, properties, path)
+
+    if honour_nomedia and data and "result" in data and "files" in data["result"]:
+      for f in data["result"]["files"]:
+        if f["label"] == ".nomedia" or f["label"] == ".nomedia.":
+          data["result"]["files"] = []
+          break
 
     return data
 
@@ -2464,7 +2670,7 @@ class MyJSONComms(object):
     # fanart/thumbnail artwork.
     directory = None
     if "file" in item:
-      directory = self.unstackFiles(item["file"])[0]
+      directory = MyUtility.unstackFiles(item["file"])[0]
     else:
       for a in ["fanart", "thumbnail"]:
         if a in item:
@@ -2570,9 +2776,6 @@ class MyJSONComms(object):
     if "result" in data:
       return "/%s" % data["result"]["details"]["path"]
     else:
-#      if filename[8:12].lower() != "http":
-#        self.logger.log("Files.PrepareDownload failed. It's a local file, what the heck... trying anyway.")
-#        return "/image/%s" % urllib2.quote(filename, "")
       return None
 
   # Get file details from a directory lookup, this prevents errors on Kodi when
@@ -2656,7 +2859,7 @@ class MyJSONComms(object):
 
   def getMusicVideoName(self, videoid):
     REQUEST = {"method":"VideoLibrary.GetMusicVideoDetails",
-               "params":{"movieid": videoid, "properties":["title"]}}
+               "params":{"musicvideoid": videoid, "properties":["title"]}}
     data = self.sendJSON(REQUEST, "libMusicVideo", checkResult=False)
     if "result" in data and "musicvideodetails" in data["result"]:
       m = data["result"]["musicvideodetails"]
@@ -2732,7 +2935,7 @@ class MyJSONComms(object):
 
     return sorted(source_list)
 
-  def getAllFilesForSource(self, mediatype, labels):
+  def getAllFilesForSource(self, mediatype, labels, ignore_list=None, honour_nomedia=False):
     if mediatype == "songs":
       mtype = "music"
       includeList = self.config.audio_filetypes
@@ -2756,7 +2959,7 @@ class MyJSONComms(object):
       for path in sources:
         self.logger.progress("Walking source: %s" % path)
 
-        for file in self.getFiles(path):
+        for file in self.getFiles(path, honour_nomedia):
           ext = os.path.splitext(file)[1].lower()
           if ext not in includeList: continue
 
@@ -2768,7 +2971,15 @@ class MyJSONComms(object):
           if isVIDEOTS and ext != ".vob": continue
           if isBDMV    and ext != ".m2ts": continue
 
-          # Avoiding adding file to list more than once, which is possible
+          if ignore_list is not None:
+            ignore_matched = False
+            for ignore in ignore_list:
+              if ignore.search(os.path.basename(file)):
+                ignore_matched = True
+                break
+            if ignore_matched: continue
+
+          # Avoid adding file to list more than once, which is possible
           # if a folder appears within multiple different sources, or the
           # same source is processed more than once...
           if not file in fileList:
@@ -2781,20 +2992,20 @@ class MyJSONComms(object):
 
     return fileList
 
-  def getFiles(self, path):
+  def getFiles(self, path, honour_nomedia=False):
     fileList = []
-    self.getFilesForPath(fileList, path)
+    self.getFilesForPath(fileList, path, honour_nomedia)
     return fileList
 
-  def getFilesForPath(self, fileList, path):
-    data = self.getDirectoryList(path, use_cache=False)
+  def getFilesForPath(self, fileList, path, honour_nomedia=False):
+    data = self.getDirectoryList(path, use_cache=False, honour_nomedia=honour_nomedia)
     if not "result" in data: return
     if not "files" in data["result"]: return
 
     for file in data["result"]["files"]:
       if "file" in file:
         if file["filetype"] == "directory":
-          self.getFilesForPath(fileList, os.path.dirname(file["file"]))
+          self.getFilesForPath(fileList, os.path.dirname(file["file"]), honour_nomedia)
         else:
           fileList.append(file["file"])
 
@@ -2977,9 +3188,10 @@ class MyJSONComms(object):
       elif mediatype in ["tvshows", "episodes"]:
         if mediatype == "tvshows":
           self.addProperties(REQUEST, "year")
-        self.addProperties(REQUEST, ",".join(self.config.IMDB_FIELDS_TVSHOWS))
-        if mediatype == "episodes":
+        elif mediatype == "episodes":
           self.delProperties(REQUEST, "genre")
+        self.addProperties(REQUEST, "file")
+        self.addProperties(REQUEST, ",".join(self.config.IMDB_FIELDS_TVSHOWS))
 
     elif action == "missing":
       for unwanted in ["artist", "art", "fanart", "thumbnail"]:
@@ -3331,12 +3543,6 @@ class MyJSONComms(object):
 
     return self.sendJSON(REQUEST, "libTextures", checkResult=False)
 
-  def unstackFiles(self, files):
-    if files.startswith("stack://"):
-      return files[8:].split(" , ")
-    else:
-      return [files]
-
 #
 # Hold and print some pretty totals.
 #
@@ -3396,14 +3602,14 @@ class MyTotals(object):
     return False
 
   def init(self, name=""):
-    with threading.Lock():
+    with lock:
       tname = threading.current_thread().name if name == "" else name
       self.THREADS[tname] = 0
       self.THREADS_HIST[tname] = (0, 0)
 
   # Record start time for an image type.
   def start(self, mediatype, imgtype):
-    with threading.Lock():
+    with lock:
       tname = threading.current_thread().name
       ctime = time.time()
       self.THREADS[tname] = ctime
@@ -3414,7 +3620,7 @@ class MyTotals(object):
   # Record current time for imgtype - this will allow stats to
   # determine cumulative time taken to download an image type.
   def finish(self, mediatype, imgtype):
-    with threading.Lock():
+    with lock:
       tname = threading.current_thread().name
       ctime = time.time()
       self.setPerformance(ctime - self.THREADS[tname])
@@ -3427,14 +3633,14 @@ class MyTotals(object):
 
   # Increment counter for action/imgtype pairing
   def bump(self, action, imgtype):
-    with threading.Lock():
+    with lock:
       if not action in self.TOTALS: self.TOTALS[action] = {}
       if not imgtype in self.TOTALS[action]: self.TOTALS[action][imgtype] = 0
       self.TOTALS[action][imgtype] += 1
 
   # Calculate and store min/max/avg.
   def setPerformance(self, elapsed):
-    with threading.Lock():
+    with lock:
       (s, e, c) = self.HISTORY
       self.HISTORY = (s, time.time(), c+1)
 
@@ -3445,7 +3651,7 @@ class MyTotals(object):
 
   # Calculate average performance per second.
   def getPerformance(self, remaining):
-    with threading.Lock():
+    with lock:
       (s, e, c) = self.HISTORY
       tpersec = (c / (e - s)) if c != 0 else 1.0
       eta = self.secondsToTime(remaining / tpersec, withMillis=False)
@@ -3647,6 +3853,9 @@ class MyMediaItem(object):
              self.decoded_filename, self.dbid, cachedurl, \
              self.libraryid, self.missingOK)
 
+  def getTypeSingular(self):
+    return self.mtype[:-1]
+
   def getFullName(self):
     if self.episode:
       if self.mtype == "tvshows":
@@ -3729,11 +3938,22 @@ class MyWatchedItem(object):
 # Helper class...
 class MyUtility(object):
   isPython3 = (sys.version_info >= (3, 0))
+  isPython3_1 = (sys.version_info >= (3, 1))
   EPOCH = datetime.datetime.utcfromtimestamp(0)
 
   DCData = {}
   DCStats = {}
   DCStatsAccumulated = {}
+
+  #http://kodi.wiki/view/Advancedsettings.xml#moviestacking
+  #<!-- <cd/dvd/part/pt/disk/disc> <0-N> -->
+  #<regexp>(.*?)([ _.-]*(?:cd|dvd|p(?:ar)?t|dis[ck])[ _.-]*[0-9]+)(.*?)(\.[^.]+)$</regexp>
+  #<!-- <cd/dvd/part/pt/disk/disc> <a-d> -->
+  #<regexp>(.*?)([ _.-]*(?:cd|dvd|p(?:ar)?t|dis[ck])[ _.-]*[a-d])(.*?)(\.[^.]+)$</regexp>
+  RE_STACKING_1_9 = re.compile("(.*?)([ _.-]*(?:cd|dvd|p(?:ar)?t|dis[ck])[ _.-]*[0-9]+)(.*?)(\.[^.]+)$", flags=re.IGNORECASE)
+  RE_STACKING_A_D = re.compile("(.*?)([ _.-]*(?:cd|dvd|p(?:ar)?t|dis[ck])[ _.-]*[a-d])(.*?)(\.[^.]+)$", flags=re.IGNORECASE)
+
+  RE_NOT_DIGITS = re.compile("[^0123456789]")
 
   # Convert quoted filename into consistent UTF-8
   # representation for both Python2 and Python3
@@ -3788,6 +4008,18 @@ class MyUtility(object):
 
     return data
 
+  # Cross-platform basename
+  # os.path.basename() doesn't work when
+  # processing a Windows filename on Linux
+  @staticmethod
+  def basename(filename):
+    # If X:\ then assume a Windows filename
+    if filename[1:].startswith(':\\'):
+      return filename.split('\\')[-1]
+
+    # Otherwise assume Linux or network (smb:// etc.) based filename
+    return filename.split('/')[-1]
+
   # Join an unquoted filename to a quoted path,
   # returning a quoted result.
   #
@@ -3804,7 +4036,7 @@ class MyUtility(object):
     # Could use dirname() here but the path is quoted
     # and we need to know which slash is being used so
     # that it can be re-appended
-    for qslash in ["%2f", "%5c"]:
+    for qslash in ["%2f", "%2F", "%5c", "%5C"]:
       pos = qpath.rfind(qslash)
       if pos != -1:
         directory = "%s%s" % (qpath[:pos], qslash)
@@ -3812,7 +4044,7 @@ class MyUtility(object):
     else:
       return None
 
-    fname = urllib2.quote(os.path.basename(filename), "")
+    fname = urllib2.quote(MyUtility.basename(filename), "")
 
     return "%s%s/" % (directory, fname)
 
@@ -3848,22 +4080,17 @@ class MyUtility(object):
     else: #fslash < bslash:
       return filename.replace("\\", "/")
 
-  # Same as above, but URL is quoted
+  # Convert a path or filename from Windows or Linux format, to the "host" OS format
   @staticmethod
-  def fixSlashesQuoted(url):
+  def PathToHostOS(filename):
     # Share (eg. "smb://", "nfs://" etc.)
-    if re.search("^.*%3a%2f%2f.*", url):
-      return url.replace("%5c", "%2f")
+    if re.search("^.*://.*", filename):
+      return filename.replace("\\", "/")
 
-    bslash = url.find("%5c")
-    fslash = url.find("%2f")
-
-    if bslash == -1 or fslash == -1:
-      return url
-    elif bslash < fslash:
-      return url.replace("%2f", "%5c")
-    else: #fslash < bslash:
-      return url.replace("%5c", "%2f")
+    if os.sep == "/":
+      return filename.replace("\\", "/")
+    else:
+      return filename.replace("/", "\\")
 
   @staticmethod
   def Top250MovieList():
@@ -3897,7 +4124,14 @@ class MyUtility(object):
         data = data[spos+8:spos+8+epos+8]
         gLogger.log("Top250: Table data found, %d bytes" % len(data))
 
-        table = ET.fromstring(data)
+        # Clean up garbage encodings
+        newdata = ""
+        for c in data:
+          if c != "&":
+            if ord(c) <= 127:
+              newdata += c
+
+        table = ET.fromstring(newdata)
 
         RE_IMDB = re.compile("/movie/\?([0-9]*)")
 
@@ -3917,7 +4151,10 @@ class MyUtility(object):
             except:
               pass
             try:
-              movie["votes"] = u"%s" % format(int(row[4].text.replace(",", "")), ",d").replace(",", gConfig.IMDB_GROUPING)
+              if gConfig.JSON_VOTES_HAVE_NO_GROUPING:
+                movie["votes"] = u"%s" % int(MyUtility.getDigits(row[4].text))
+              else:
+                movie["votes"] = u"%s" % format(int(MyUtility.getDigits(row[4].text)), ",d").replace(",", gConfig.IMDB_GROUPING)
             except:
               pass
             movies[movie["link"]] = movie
@@ -3933,19 +4170,24 @@ class MyUtility(object):
       return None
 
   @staticmethod
-  def getIMDBInfo(imdbnumber=None, title=None, year=None, season=None, episode=None, plotFull=False, plotOutline=False, qtimeout=15.0):
+  def getIMDBInfo(mediatype, apikey, imdbnumber=None, title=None, year=None, season=None, episode=None, plotFull=False, plotOutline=False, qtimeout=15.0):
     try:
-      base_url = "http://www.omdbapi.com"
+      omdb_url = "http://www.omdbapi.com/"
+      base_url = "%s?apikey=%s" % (omdb_url, apikey)
+      redacted_url = "%s?apikey=%s" % (omdb_url, "<yourkey>")
 
       isMovie = isTVShow = isSeason = isEpisode = False
 
-      if imdbnumber is not None:
+      if mediatype == "movie":
         query_url = "i=%s&type=movie" % imdbnumber
         reference = imdbnumber
         isMovie = True
-      elif title is not None and year is not None:
+      elif mediatype in ["tvshow", "episode"]:
         reference = "tvshow: %s (%d)" % (title, year)
-        query_url = "t=%s&y=%d" % (MyUtility.denormalise(title, False), year)
+        if imdbnumber is not None:
+          query_url = "i=%s" % imdbnumber
+        else:
+          query_url = "t=%s&y=%d" % (MyUtility.denormalise(title, False), year)
         isTVShow = True
         if season:
           query_url = "%s&season=%d" % (query_url, season)
@@ -3963,13 +4205,13 @@ class MyUtility(object):
 
       # For movie, get both short plot, and optionally the full plot. Use fields from short query.
       if isMovie:
-        f = urllib2.urlopen("%s?%s&plot=short" % (base_url, query_url), timeout=qtimeout)
+        f = urllib2.urlopen("%s&%s&plot=short" % (base_url, query_url), timeout=qtimeout)
         data_short = json.loads(f.read().decode("utf-8"))
         f.close()
 
       # For TV shows and Episodes, we only need the full plot and fields.
       if not isMovie or plotFull:
-        f = urllib2.urlopen("%s?%s&plot=full" % (base_url, query_url), timeout=qtimeout)
+        f = urllib2.urlopen("%s&%s&plot=full" % (base_url, query_url), timeout=qtimeout)
         data_full = json.loads(f.read().decode("utf-8"))
         f.close()
 
@@ -3984,9 +4226,9 @@ class MyUtility(object):
         data["Plot"] = data_full.get("Plot", None)
 
       if "Response" not in data or data["Response"] == "False":
-        gLogger.log("Failed OMDBAPI Query [%s?%s] => [%s]" % (base_url, query_url, data))
+        gLogger.log("Failed OMDb API Query [%s&%s] => [%s]" % (redacted_url, query_url, data))
         if isTVShow and not isEpisode:
-          gLogger.log("Try OMDBAPI Query [%s?s=%s&type=series] to see possible available titles (hint: year of tvshow is %d)" %(base_url, title, year))
+          gLogger.log("Try OMDb API Query [%s&s=%s&type=series] to see possible available titles (hint: year of tvshow is %d)" %(redacted_url, title, year))
         return {}
 
       # Convert omdbapi.com fields to Kodi fields - mostly just a case
@@ -4027,17 +4269,39 @@ class MyUtility(object):
             if r > 0:
               newdata[newkey] = r
           elif newkey == "votes":
-            newdata[newkey] = format(int(data[key].replace(",","")), ",d").replace(",", gConfig.IMDB_GROUPING)
+            if gConfig.JSON_VOTES_HAVE_NO_GROUPING:
+              newdata[newkey] = "%s" % int(MyUtility.getDigits(data[key]))
+            else:
+              newdata[newkey] = format(int(MyUtility.getDigits(data[key])), ",d").replace(",", gConfig.IMDB_GROUPING)
+          elif newkey == "rated":
+            newkey = "mpaa"
+            if data[key] == None or data[key] in ["Not Rated", "Unrated"]:
+              newdata[newkey] = "Not Rated"
+            else:
+              newdata[newkey] = "Rated %s" % data[key]
+          elif newkey == "released":
+            newkey = "premiered"
+            newdata[newkey] = datetime.datetime.strptime(data[key].replace(" ","-"), '%d-%b-%Y').strftime("%Y-%m-%d")
           else:
             newdata[newkey] = data[key]
+
+          if newkey in newdata:
+            newdata[newkey] = MyUtility.toUnicode(newdata[newkey])
+
         except Exception as e:
           gLogger.log("Exception during IMDb processing: reference [%s], key [%s]. msg [%s]" % (reference, key, str(e)))
-          gLogger.log("OMDBAPI Query [%s?%s]" % (base_url, query_url))
+          gLogger.log("OMDb API Query [%s&%s]" % (redacted_url, query_url))
       return newdata
     except Exception as e:
       gLogger.log("Exception during IMDb processing: reference [%s], timeout [%s], msg [%s]" % (reference, qtimeout, str(e)))
-      gLogger.log("OMDBAPI Query [%s?%s]" % (base_url, query_url))
+      gLogger.log("OMDb API Query [%s&%s]" % (redacted_url, query_url))
       return {}
+
+  @staticmethod
+  def nonestr(s):
+    if s is None:
+      return ""
+    return str(s)
 
   @staticmethod
   def is_cache_item_stale(config, jcomms, mediaitem):
@@ -4054,7 +4318,7 @@ class MyUtility(object):
 
   @staticmethod
   def invalidateDirectoryCache(mediatype):
-    with threading.Lock():
+    with lock:
       # Transfer current stats to accumulated
       for p in MyUtility.DCData:
         for c in MyUtility.DCStats[p]:
@@ -4075,7 +4339,7 @@ class MyUtility(object):
     fs_bs = "\\" if path.find("\\") != -1 else "/"
     if path[-1:] != fs_bs: path += fs_bs
 
-    with threading.Lock():
+    with lock:
       if props not in MyUtility.DCData:
         MyUtility.DCData[props] = {}
       if props not in MyUtility.DCStats:
@@ -4102,7 +4366,7 @@ class MyUtility(object):
     fs_bs = "\\" if path.find("\\") != -1 else "/"
     if path[-1:] != fs_bs: path += fs_bs
 
-    with threading.Lock():
+    with lock:
       if props not in MyUtility.DCData:
         MyUtility.DCData[props] = {}
         if props not in MyUtility.DCStats:
@@ -4114,7 +4378,6 @@ class MyUtility(object):
       else:
         MyUtility.DCStats[props]["hit"] += 1
         c = MyUtility.DCData[props][path]
-#        MyUtility.DCData[props][path] = {"time": time.time(), "count": c["count"]+1, "data": c["data"]}
         c["time"] = time.time()
         c["count"] += 1
         result = c["data"]
@@ -4195,6 +4458,36 @@ class MyUtility(object):
     fields = strVersion.split(".")
     return int("%03d%03d%03d" % (int(fields[0]), int(fields[1]), int(fields[2])))
 
+  @staticmethod
+  def removeDiscPart(filename):
+
+    match = MyUtility.RE_STACKING_1_9.match(filename)
+    if not match:
+      match = MyUtility.RE_STACKING_A_D.match(filename)
+
+    if match and len(match.groups()) >= 3:
+      p1 = match.string[:match.end(1)]
+      p2 = match.string[match.start(3):]
+      p1 = p1[:-1] if p1[-1] in [" ", "(", "[", ".", "-", "_"] else p1
+      p2 = p2[1:] if p2[0] in [")", "]"] else p2
+      return "%s%s" % (p1, p2)
+
+    return filename
+
+  @staticmethod
+  def unstackFiles(files, addcombinedfile=False):
+    if files.startswith("stack://"):
+      unstack = files[8:].split(" , ")
+      if addcombinedfile:
+        unstack.insert(0, MyUtility.removeDiscPart(unstack[0]))
+      return unstack
+    else:
+      return [files]
+
+  @staticmethod
+  def getDigits(text):
+    return MyUtility.RE_NOT_DIGITS.sub("", text)
+
 #
 # Load data using JSON-RPC. In the case of TV shows, also load seasons
 # and Episodes into a single data structure.
@@ -4203,7 +4496,7 @@ class MyUtility(object):
 #
 def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, rescan=False, \
                       decode=False, ensure_ascii=True, nodownload=False, lastRun=False, \
-                      labels=None, query="", filename=None, wlBackup=True):
+                      labels=None, query="", filename=None, wlBackup=True, drop_items=None):
   if mediatype not in ["addons", "agenres", "vgenres", "albums", "artists", "songs", "musicvideos",
                        "movies", "sets", "tags", "tvshows", "pvr.tv", "pvr.radio"]:
     gLogger.err("ERROR: %s is not a valid media class" % mediatype, newLine=True)
@@ -4231,7 +4524,7 @@ def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, resc
 
   if mediatype == "tvshows":
     TOTALS.addSeasonAll()
-    gLogger.progress("Loading TV Shows...")
+    gLogger.progress("Loading TV shows...")
   else:
     gLogger.progress("Loading %s..." % mediatype.capitalize())
 
@@ -4255,11 +4548,12 @@ def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, resc
       (section_name, title_name, id_name, data) = jcomms.getData(action, mediatype, filter, extraFields,
                                                                  lastRun=lastRun, secondaryFields=secondaryFields,
                                                                  subType=subtype)
+      filter_name = gConfig.FILTER_FIELD if gConfig.FILTER_FIELD else title_name
       if data and "result" in data and section_name in data["result"]:
         if filter != "":
           filteredData = []
           for d in data["result"][section_name]:
-            if re.search(filter, d[title_name], re.IGNORECASE):
+            if re.search(filter, d[filter_name], re.IGNORECASE):
               filteredData.append(d)
           data["result"][section_name] = filteredData
         if len(data["result"][section_name]) > 0:
@@ -4278,10 +4572,11 @@ def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, resc
 
   # Manually filter these mediatypes as JSON doesn't support filtering
   if data and filter and mediatype in ["addons", "agenres", "sets", "pvr.tv", "pvr.radio"]:
-    gLogger.log("Filtering %s on %s = %s" % (mediatype, title_name, filter))
+    filter_name = gConfig.FILTER_FIELD if gConfig.FILTER_FIELD else title_name
+    gLogger.log("Filtering %s on %s = %s" % (mediatype, filter_name, filter))
     filteredData = []
     for d in data:
-      if re.search(filter, d[title_name], re.IGNORECASE):
+      if re.search(filter, d[filter_name], re.IGNORECASE):
         filteredData.append(d)
     data = filteredData
 
@@ -4336,7 +4631,7 @@ def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, resc
   if mediatype == "tvshows" and gConfig.QUERY_SEASONS:
     for tvshow in data:
       title = tvshow["title"]
-      gLogger.progress("Loading TV Show: %s..." % title)
+      gLogger.progress("Loading TV show: %s..." % title)
 
       (s2, t2, i2, data2) = jcomms.getData(action, "seasons", filter, extraFields, tvshow=tvshow, lastRun=lastRun, uniquecast=UCAST)
       if not "result" in data2: return
@@ -4390,13 +4685,13 @@ def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, resc
 
   if data != []:
     if action == "cache":
-      cacheImages(mediatype, jcomms, database, data, title_name, id_name, force, nodownload)
+      cacheImages(mediatype, jcomms, database, data, title_name, id_name, force, nodownload, drop_items)
     elif action == "qa":
       qaData(mediatype, jcomms, database, data, title_name, id_name, rescan)
     elif action == "dump":
       jcomms.dumpJSON(data, decode, ensure_ascii)
     elif action == "missing":
-      fileList = jcomms.getAllFilesForSource(mediatype, labels)
+      fileList = jcomms.getAllFilesForSource(mediatype, labels, gConfig.MISSING_IGNORE_PATTERNS, True)
       missingFiles(mediatype, data, fileList, title_name, id_name)
     elif action == "query":
       queryLibrary(mediatype, query, data, title_name, id_name)
@@ -4428,7 +4723,7 @@ def jsonQuery(action, mediatype, filter="", force=False, extraFields=False, resc
 # 1..n threads. Errors will be added to an error queue by the threads, and
 # subsueqently displayed to the user at the end.
 #
-def cacheImages(mediatype, jcomms, database, data, title_name, id_name, force, nodownload):
+def cacheImages(mediatype, jcomms, database, data, title_name, id_name, force, nodownload, drop_items):
 
   mediaitems = []
   imagecache = {}
@@ -4602,9 +4897,27 @@ def cacheImages(mediatype, jcomms, database, data, title_name, id_name, force, n
     while not error_queue.empty():
       item = error_queue.get()
       error_queue.task_done()
-      name = item.getFullName()[:40]
+
+      # Ignore itypes with a period, eg. "cast.thumb" or "season.banner"
+      if item.mtype in ["sets", "movies", "tvshows", "seasons", "episodes"] and item.itype.find(".") == -1:
+        drop_id = "%s#%d" % (item.mtype, item.libraryid)
+        if drop_id not in drop_items:
+          drop_items[drop_id] = {"libraryid": item.libraryid, "title": item.name, "type": item.getTypeSingular(), "items": {}}
+        drop_item = drop_items[drop_id]
+        artwork_items = drop_item["items"]
+        artwork_items["art.%s" % item.itype] = ""
+        drop_item["items"] = artwork_items
+        drop_items[drop_id] = drop_item
+
+      name = addEllipsis(50, item.getFullName())
       gLogger.out("[%-10s] [%-40s] %s\n" % (item.itype, name, item.decoded_filename))
       gLogger.log("ERROR ITEM: %s" % item)
+
+def dump_drop_items(drop_items):
+  if gConfig.CACHE_DROP_INVALID_FILE:
+    outfile = codecs.open(gConfig.CACHE_DROP_INVALID_FILE, "wb", encoding="utf-8")
+    outfile.write(json.dumps(drop_items.values(), indent=2, ensure_ascii=True, sort_keys=True))
+    outfile.close()
 
 def showProgress(tRunning, maxItems, swqs, mwqs, ewqs, remaining=0, completed=0, interval=0.0, history=None):
   c = 0
@@ -4806,6 +5119,8 @@ def parseURLData(jcomms, mediatype, mediaitems, imagecache, data, title_name, id
         season = title
         longName = "%s, %s" % (pvrGroup, title)
         episode = None
+        # channelid may be missing for some reason
+        item["channelid"] = item.get("channelid",0)
     else:
       name = title
       longName = name
@@ -5007,24 +5322,32 @@ def qaData(mediatype, jcomms, database, data, title_name, id_name, rescan, work=
               break
 
     if (check_file or nfo_file) and "file" in item:
-      for file in unstackFiles(item["file"]):
+      files = None
+      file_not_found = check_file
+      nfo_not_found = nfo_file
+      for file in MyUtility.unstackFiles(item["file"], addcombinedfile=True):
         dir = os.path.dirname(file)
         data = jcomms.getDirectoryList(dir, mediatype="files", properties=["file", "lastmodified"])
-        files = data.get("result", {}).get("files", [])
+        if files == None:
+          files = data.get("result", {}).get("files", [])
 
-        if check_file and not [f for f in files if f["filetype"] == "file" and f.get("file", None) == file]:
-          missing["missing file"] = False
+        if check_file and file_not_found and [f for f in files if f["filetype"] == "file" and f.get("file", None) == file]:
+          file_not_found = False
 
-        if nfo_file:
+        if nfo_file and nfo_not_found:
           nfofile = "%s.nfo" % os.path.splitext(file)[0]
           for f in [x for x in files if x["filetype"] == "file" and x.get("file", None) == nfofile]:
+            nfo_not_found = False
             jcomms.setTimeStamp(f)
             if "lastmodified_timestamp" in f and \
                f["lastmodified_timestamp"] >= gConfig.qa_nfo_refresh_date:
               missing["modified nfo"] = True
-            break
-          else:
-            missing["missing nfo"] = False
+
+      if file_not_found:
+        missing["missing file"] = False
+
+      if nfo_not_found:
+        missing["missing nfo"] = False
 
     if "seasons" in item:
       qaData("seasons", jcomms, database, item["seasons"], "label", "season", False, \
@@ -5048,11 +5371,11 @@ def qaData(mediatype, jcomms, database, data, title_name, id_name, rescan, work=
         if mtype == "Tvshow": mtype = "TVShow"
 
       if "file" in item:
-        mFAIL = ", ".join([x for x in missing if missing[x] == True])
-        mWARN = ", ".join([x for x in missing if missing[x] == False])
+        mFAIL = "; ".join([x for x in missing if missing[x] == True])
+        mWARN = "; ".join([x for x in missing if missing[x] == False])
       else:
         mFAIL = ""
-        mWARN = ", ".join(missing)
+        mWARN = "; ".join(missing)
 
       msg = ""
       if mFAIL: msg = "%sFAIL (%s), " % (msg, mFAIL)
@@ -5061,7 +5384,7 @@ def qaData(mediatype, jcomms, database, data, title_name, id_name, rescan, work=
       mediaitems.append("%-8s [%-50s]: %s" % (mtype, addEllipsis(50, name), msg))
 
       if "file" in item and mFAIL:
-        dir = "%s;%s" % (mediatype, os.path.dirname(unstackFiles(item["file"])[0]))
+        dir = "%s;%s" % (mediatype, os.path.dirname(MyUtility.unstackFiles(item["file"])[0]))
         libraryids = workItems[dir] if dir in workItems else []
         libraryids.append({"id": libraryid, "name": name})
         workItems[dir] = libraryids
@@ -5083,12 +5406,13 @@ def qa_check_artfile_exists(jcomms, mediatype, item, artwork):
   if "file" not in item:
     return False
 
-  dir = os.path.dirname(item["file"])
+  filename = MyUtility.unstackFiles(item["file"], addcombinedfile=True)[0]
+  dir = os.path.dirname(filename)
   data = jcomms.getDirectoryList(dir, mediatype="files", properties=["file", "lastmodified"])
   files = data.get("result", {}).get("files", [])
 
   if files:
-    for art in get_qa_artworkcandidates(mediatype, item, artwork):
+    for art in get_qa_artworkcandidates(mediatype, filename, item, artwork):
       for file in files:
         if file["filetype"] == "file" and file["file"] == art:
           return True
@@ -5097,11 +5421,10 @@ def qa_check_artfile_exists(jcomms, mediatype, item, artwork):
 
 # Construct a list of potential artwork candidates
 # based on file name and artwork type.
-def get_qa_artworkcandidates(mediatype, item, artwork):
+def get_qa_artworkcandidates(mediatype, filename, item, artwork):
   art = []
   types = []
 
-  filename = item["file"]
   fname = os.path.splitext(filename)[0]
   parent = os.path.dirname(filename)
   fs_bs = "\\" if filename.find("\\") != -1 else "/"
@@ -5117,11 +5440,16 @@ def get_qa_artworkcandidates(mediatype, item, artwork):
 
   for t in types:
     art.append("%s-%s.jpg" % (fname, t))
+    art.append("%s-%s.png" % (fname, t))
     art.append("%s%s%s.jpg" % (parent, fs_bs, t))
+    art.append("%s%s%s.png" % (parent, fs_bs, t))
     if mediatype in ["albums", "songs"] and t == "thumbnail":
       art.append("%s.jpg" % (fname))
+      art.append("%s.png" % (fname))
       art.append("%s%s%s.jpg" % (parent, fs_bs, "folder"))
+      art.append("%s%s%s.png" % (parent, fs_bs, "folder"))
       art.append("%s%s%s.jpg" % (parent, fs_bs, "cover"))
+      art.append("%s%s%s.png" % (parent, fs_bs, "cover"))
 
   return art
 
@@ -5162,7 +5490,7 @@ def missingFiles(mediatype, data, fileList, title_name, id_name, showName=None, 
     # Remove matched file from fileList - what files remain at the end
     # will be reported to the user
     if mediatype != "tvshows" and "file" in item:
-      for file in unstackFiles(item["file"]):
+      for file in MyUtility.unstackFiles(item["file"]):
         try:
           fileList.remove(file)
         except ValueError:
@@ -5299,12 +5627,6 @@ def addEllipsis(maxlen, aStr):
   iright = int(maxlen/2) - 1
 
   return "%s...%s" % (aStr[0:ileft], aStr[-iright:])
-
-def unstackFiles(files):
-  if files.startswith("stack://"):
-    return files[8:].split(" , ")
-  else:
-    return [files]
 
 def searchItem(data, field):
   if field in data: return data[field]
@@ -5646,22 +5968,39 @@ def updateIMDb(mediatype, jcomms, data):
     for tvshow in data:
       if tvshow["tvshowid"] not in tvhash: continue
       if "seasons" not in tvshow: continue
+
+      multipart = {}
+
       for season in tvshow["seasons"]:
         if season["season"] < 1: continue
         if "episodes" not in season: continue
+
         for episode in season["episodes"]:
           if "title" not in episode:
             episode["title"] = episode["label"]
 
+          episode["imdbnumber"] = tvhash[tvshow["tvshowid"]]["imdbnumber"]
+
           SxE = re.sub("[0-9]*x([0-9]*)\..*", "\\1", episode["label"])
           if SxE == episode["label"] or int(SxE) < 1: continue
+
+          file = episode.get("file", None)
+          if file is not None:
+            if file is not None and file in multipart:
+              multipart_first = multipart[file]
+            else:
+              multipart[file] = (season["season"], int(SxE))
+              multipart_first = None
+          else:
+            multipart_first = None
 
           epsdata.append({"ShowTitle": tvshow["title"],
                           "ShowYear":  tvshow["year"],
                           "OriginalShowTitle": tvshow["tc.title"],
                           "Season":    season["season"],
                           "Episode":   int(SxE),
-                          "item":        episode})
+                          "multipart_ep": multipart_first,
+                          "item":      episode})
 
     # Add episodes requiring updates to the existing list of work items
     worklist.extend(_ProcessIMDB("episodes", jcomms, epsdata, plotFull, plotOutline, movies250, imdbfields))
@@ -5693,34 +6032,57 @@ def _ProcessIMDB(mediatype, jcomms, data, plotFull, plotOutline, movies250, imdb
       input_queue.put({"item": movie})
   elif mediatype == "tvshows":
     re_ignore_titles = []
+    re_map_titles = []
     re_trans_titles = []
     re_trans_years = []
     re_parenthesis = re.compile("\([a-zA-Z]*\)$")
 
     for ft in gConfig.IMDB_IGNORE_TVTITLES:
       re_ignore_titles.append(re.compile(ft, re.IGNORECASE))
+
+    for ft in gConfig.IMDB_MAP_TVTITLES:
+      ftsplit = ft.split("=")
+      if len(ftsplit) == 2:
+        re_map_titles.append((re.compile(ftsplit[0], re.IGNORECASE), ftsplit[1]))
+
     for ft in gConfig.IMDB_TRANSLATE_TVTITLES:
       ftsplit = ft.split("=")
       if len(ftsplit) == 2:
         re_trans_titles.append((re.compile(ftsplit[0], re.IGNORECASE), ftsplit[1]))
+
     for ft in gConfig.IMDB_TRANSLATE_TVYEARS:
       ftsplit = ft.split("=")
       if len(ftsplit) == 2 and ftsplit[1]:
         re_trans_years.append((re.compile(ftsplit[0], re.IGNORECASE), int(ftsplit[1])))
+
     for tvshow in data:
       ignoreShow = False
       tvshow["tc.title"] = tvshow["title"]
       tvshow["tc.year"] = tvshow["year"]
+
       for ignore in re_ignore_titles:
         if ignore.search(tvshow["title"]):
-          gLogger.log("PREP OMDb: Title: [%s] ignoring TV show - matched [%s] in imdb.ignore.tvtitles" % (tvshow["title"], ignore.pattern))
+          gLogger.log("Pre-processing #1 OMDb: Title: [%s] ignoring TV show - matched [%s] in imdb.ignore.tvtitles" % (tvshow["title"], ignore.pattern))
           ignoreShow = True
           break
+
       if not ignoreShow:
+        # Map to imdbnumber?
+        for trans in re_map_titles:
+          if trans[0].search(tvshow["title"]):
+            gLogger.log("Pre-processing #2 OMDb: Title: [%s] mapped to imdbnumber for pattern [%s], assigning [%s]" % (tvshow["title"], trans[0].pattern, trans[1]))
+            tvshow["imdbnumber"] = trans[1]
+            break
+
+        # If we've got an imdbnumber don't bother with remaining translations
+        if "imdbnumber" in tvshow:
+          input_queue.put({"OriginalShowTitle": tvshow["tc.title"], "item": tvshow})
+          continue
+
         # Translate year
         for trans in re_trans_years:
           if trans[0].search(tvshow["title"]):
-            gLogger.log("PREP OMDb: Title: [%s] translating TV show year for pattern [%s], replacing [%d] with [%d]" % (tvshow["title"], trans[0].pattern, tvshow["year"], trans[1]))
+            gLogger.log("Pre-processing #2 OMDb: Title: [%s] translating TV show year for pattern [%s], replacing [%d] with [%d]" % (tvshow["title"], trans[0].pattern, tvshow["year"], trans[1]))
             tvshow["year"] = trans[1]
 
         # Translate title
@@ -5728,13 +6090,13 @@ def _ProcessIMDB(mediatype, jcomms, data, plotFull, plotOutline, movies250, imdb
           if trans[0].search(tvshow["title"]):
             before_title = tvshow["title"]
             tvshow["title"] = trans[0].sub(trans[1], tvshow["title"]).strip()
-            gLogger.log("PREP OMDb: Title: [%s] translating TV show title for pattern [%s], replacing with [%s], giving [%s]" % (before_title, trans[0].pattern, trans[1], tvshow["title"]))
+            gLogger.log("Pre-processing #3 OMDb: Title: [%s] translating TV show title for pattern [%s], replacing with [%s], giving [%s]" % (before_title, trans[0].pattern, trans[1], tvshow["title"]))
 
         # Remove original year from end of title
         if tvshow["tc.year"] is not None and tvshow["title"].endswith("(%d)" % tvshow["tc.year"]):
           before_title = tvshow["title"]
           tvshow["title"] = re.sub("\(%d\)$" % tvshow["tc.year"], "", tvshow["title"]).strip()
-          gLogger.log("PREP OMDb: Title: [%s] removing year from title, giving [%s]" % (before_title, tvshow["title"]))
+          gLogger.log("Pre-processing #4 OMDb: Title: [%s] removing year from title, giving [%s]" % (before_title, tvshow["title"]))
 
         # Remove trailing parenthesis (...) from end of title - most likely to be a country code
         if gConfig.IMDB_DEL_PARENTHESIS:
@@ -5742,9 +6104,10 @@ def _ProcessIMDB(mediatype, jcomms, data, plotFull, plotOutline, movies250, imdb
           if re_find:
             before_title = tvshow["title"]
             tvshow["title"] = tvshow["title"][:re_find.start() - 1].strip()
-            gLogger.log("PREP OMDb: Title: [%s] removing trailing parenthesis from title, giving [%s]" % (before_title, tvshow["title"]))
+            gLogger.log("Pre-processing #5 OMDb: Title: [%s] removing trailing parenthesis from title, giving [%s]" % (before_title, tvshow["title"]))
 
         input_queue.put({"OriginalShowTitle": tvshow["tc.title"], "item": tvshow})
+
   elif mediatype == "episodes":
     for episode in data:
       input_queue.put(episode)
@@ -5790,14 +6153,16 @@ def _ProcessIMDB(mediatype, jcomms, data, plotFull, plotOutline, movies250, imdb
 
     gLogger.progress("Processing IMDb: %s..." % infotitle)
 
+    newimdb = qItem["newimdb"]
+
     if mediatype == "movies":
       libid = item["movieid"]
     elif mediatype == "tvshows":
       libid = item["tvshowid"]
+      imdbnumber = newimdb.get("id", "")
     elif mediatype == "episodes":
       libid = item["episodeid"]
-
-    newimdb = qItem["newimdb"]
+      imdbnumber = newimdb.get("id", "")
 
     # Truncate rating to 1 decimal place
     # Keep existing value if difference is likely to be due to platform
@@ -5816,19 +6181,26 @@ def _ProcessIMDB(mediatype, jcomms, data, plotFull, plotOutline, movies250, imdb
     olditems = {"items": {}}
     workitem = {"type": mediatype[:-1],
                 "libraryid": libid,
+                "imdbnumber": imdbnumber,
                 "title": title,
                 "items": {}}
 
     if year is not None:
       workitem["year"] = year,
+
     if mediatype == "episodes":
       workitem["episodetitle"] = item["title"]
 
     for field in imdbfields:
       # Don't attempt to change title of tvshows
       if mediatype == "tvshows" and field in ["title"]: continue
+
       # Don't attempt to set genre for episodes - only works at the tvshow level
       if mediatype == "episodes" and field in ["genre"]: continue
+
+      # Don't overwrite a movie rating if the movie already has a rating (eg. foreign movie with manually assigned rating)
+      if mediatype == "movies" and field == "mpaa":
+        if item.get(field, None) not in ["Rated Not Rated", "Not Rated", "Rated Unrated", "Unrated", "NR", "null"]: continue
 
       if field in newimdb:
         if field not in item or item[field] != newimdb[field] and newimdb[field] is not None:
@@ -5839,10 +6211,12 @@ def _ProcessIMDB(mediatype, jcomms, data, plotFull, plotOutline, movies250, imdb
     # TVshows without any changes will be dropped at the end.
     if workitem["items"] or mediatype == "tvshows":
       worklist.append(workitem)
-      gLogger.log("Workitem for id: %d, type: %s, title: %s" %
-                  (workitem["libraryid"], workitem["type"], infotitle))
-      gLogger.log("  Old items: %s" % olditems["items"])
-      gLogger.log("  New items: %s" % workitem["items"])
+      if gLogger.LOGGING:
+        with lock: # Grab threading lock to prevent threads intermingling their output with our main thread
+          gLogger.log("Workitem for id: %d, type: %s, title: %s" %
+                      (workitem["libraryid"], workitem["type"], infotitle))
+          gLogger.log("  Old items: %s" % olditems["items"])
+          gLogger.log("  New items: %s" % workitem["items"])
 
   gLogger.progress("")
 
@@ -6456,7 +6830,7 @@ def getAllFiles(keyFunction):
     # Free memory used to cache any GetDirectory() information
     MyUtility.invalidateDirectoryCache(mediatype)
 
-  gLogger.progress("Loading TVShows...")
+  gLogger.progress("Loading TV shows...")
 
   REQUEST = {"method":"VideoLibrary.GetTVShows",
              "params": {"sort": {"order": "ascending", "method": "title"},
@@ -6469,7 +6843,7 @@ def getAllFiles(keyFunction):
 
   if "result" in tvdata and "tvshows" in tvdata["result"]:
     for tvshow in tvdata["result"]["tvshows"]:
-      gLogger.progress("Loading TVShows: %s..." % tvshow["title"])
+      gLogger.progress("Loading TV show: %s..." % tvshow["title"])
       tvshowid = tvshow["tvshowid"]
 
       for a in tvshow.get("art", {}):
@@ -6497,7 +6871,7 @@ def getAllFiles(keyFunction):
             gLogger.err("WARNING: TV show [%s] has invalid season (%d) - ignored" % (tvshow["title"], seasonid), newLine=True)
             continue
 
-          gLogger.progress("Loading TV shows: %s, season %d..." % (tvshow["title"], seasonid))
+          gLogger.progress("Loading TV show: %s, season %d..." % (tvshow["title"], seasonid))
 
           for a in season.get("art", {}):
             if SEASON_ALL and a in ["poster", "tvshow.poster", "tvshow.fanart", "tvshow.banner"]:
@@ -6513,6 +6887,8 @@ def getAllFiles(keyFunction):
                                "properties":["cast", "art", "file"]}}
 
           episodedata = jcomms.getDataProxy("episodes", REQUEST, uniquecast=UCAST)
+          if "episodes" not in episodedata["result"]:
+            continue # ignore seasons without episodes
 
           for episode in episodedata["result"]["episodes"]:
             episodeid = episode["episodeid"]
@@ -6708,7 +7084,7 @@ def get_mangled_artwork(jcomms):
           addItems(i, mtype, idname)
         if title != "": gLogger.progress("Parsing %s: %s..." % (mediatype, title))
 
-  gLogger.progress("Loading TVShows...")
+  gLogger.progress("Loading TV shows...")
 
   REQUEST = {"method":"VideoLibrary.GetTVShows",
              "params": {"sort": {"order": "ascending", "method": "title"},
@@ -6718,7 +7094,7 @@ def get_mangled_artwork(jcomms):
 
   if "result" in tvdata and "tvshows" in tvdata["result"]:
     for tvshow in tvdata["result"]["tvshows"]:
-      gLogger.progress("Loading TVShows: %s..." % tvshow["title"])
+      gLogger.progress("Loading TV show: %s..." % tvshow["title"])
 
       tvshowid = tvshow["tvshowid"]
       addItems(tvshow, "tvshow", "tvshowid")
@@ -6737,7 +7113,7 @@ def get_mangled_artwork(jcomms):
             gLogger.err("WARNING: TV show [%s] has invalid season (%d) - ignored" % (tvshow["title"], seasonid), newLine=True)
             continue
 
-          gLogger.progress("Loading: TV shows [%s, season %d]..." % (tvshow["title"], seasonid))
+          gLogger.progress("Loading TV show: [%s, season %d]..." % (tvshow["title"], seasonid))
 
           # Can't set items on season unless seasonid is present...
           if "seasonid" in season:
@@ -6799,7 +7175,7 @@ def getDirectoryFiles(jcomms, path, nodirmsg=True, recurse=False):
       gLogger.out("Directory \"%s\" is empty." % path, newLine=True)
     return
 
-  for file in sorted(data["result"]["files"]):
+  for file in sorted(data["result"]["files"], key=(lambda x: x["file"]), reverse=False):
     if "file" in file:
       ftype = file["filetype"]
       fname = file["file"]
@@ -6876,7 +7252,7 @@ def showStatus(idleTime=600):
   STATUS = []
 
   if gConfig.JSON_HAS_PROFILE_SUPPORT:
-    STATUS.append("Current Profile: %s" % gConfig.CURRENT_PROFILE["name"])
+    STATUS.append("Current Profile: %s" % gConfig.CURRENT_PROFILE["label"])
 
   REQUEST = {"method": "XBMC.GetInfoBooleans",
              "params": {"booleans": ["System.ScreenSaverActive", "Library.IsScanningMusic", "Library.IsScanningVideo", "System.HasShutdown", "System.CanSuspend"]}}
@@ -6975,7 +7351,7 @@ def rbphdmi(delay):
   hdmimgr.setDaemon(True)
   hdmimgr.start()
 
-  gLogger.debug("Connecting to Kodi on %s..." % gConfig.XBMC_HOST)
+  gLogger.debug("Connecting to Kodi on %s..." % gConfig.KODI_HOST)
   while True:
     try:
       MyJSONComms(gConfig, gLogger).sendJSON({"method": "JSONRPC.Ping"}, "libListen", callback=rbphdmi_listen, checkResult=False)
@@ -7013,7 +7389,7 @@ def MediaLibraryStats(media_list):
   lmedia_list = [m for m in lmedia_list if m not in ["audio", "video"]]
 
   if gConfig.JSON_HAS_PROFILE_SUPPORT:
-    gLogger.out("%-11s: %s" % ("Profile", gConfig.CURRENT_PROFILE["name"]), newLine=True)
+    gLogger.out("%-11s: %s" % ("Profile", gConfig.CURRENT_PROFILE["label"]), newLine=True)
 
   for m in METHODS:
     media = re.search(".*Get(.*)", m).group(1)
@@ -7028,8 +7404,14 @@ def ProcessInput(args):
   ACTIONS = ["Back", "ContextMenu", "Down",
              "ExecuteAction", "Home", "Info",
              "Left", "Right", "Select",
-             "SendText", "ShowCodec", "ShowOSD",
+             "SendText", "ShowOSD",
              "Up", "Pause"]
+
+  if not gConfig.JSON_CODEC_INFO_REMOVED:
+    ACTIONS.append("ShowCodec")
+
+  if gConfig.JSON_PLAYER_PROCESS_INFO:
+    ACTIONS.append("ShowPlayerProcessInfo")
 
   actionparam = []
 
@@ -7171,7 +7553,7 @@ def readFile(infile, outfile):
   url = jcomms.getDownloadURL(infile)
   if url:
     try:
-      PAYLOAD = jcomms.sendWeb("GET", url, rawData=True)
+      PAYLOAD = jcomms.sendWeb("GET", url, "readFile", rawData=True)
       if outfile == "-":
         os.write(sys.stdout.fileno(), PAYLOAD)
         sys.stdout.flush()
@@ -7305,7 +7687,7 @@ def usage(EXIT_CODE):
   pprint("[s, S] <string> | [x, X, f, F] [sql-filter] | Xd | d <id[id id]>] | \
           c [class [filter]] | nc [class [filter]] | lc [class] | lnc [class] | C class filter | \
           [j, J, jd, Jd, jr, Jr] class [filter] | qa class [filter] | qax class [filter] | [p, P] | [r, R] | \
-          imdb movies [filter] | \
+          imdb movies [filter] | imdb tvshows [filter] | \
           purge hashed;unhashed;all pattern [pattern [pattern]] | \
           purgetest hashed;unhashed;all pattern [pattern [pattern]] | \
           fixurls | \
@@ -7324,6 +7706,7 @@ def usage(EXIT_CODE):
           stress-test view-type numitems [pause] [repeat] [cooldown] | \
           setsetting name value | getsetting name | getsettings [pattern] | debugon | debugoff | \
           play item [playerid] | playw item [playerid] | stop [playerid] | pause [playerid] | \
+          profiles | \
           config | version | update | fupdate")
   print("")
   print("  s          Search URL column for partial movie or TV show title. Case-insensitive.")
@@ -7339,6 +7722,7 @@ def usage(EXIT_CODE):
   print("  nc         Same as c, but don't actually cache anything (ie. see what is missing). Class can be movies, tags, sets, tvshows, artists, albums or songs.")
   print("  lc         Like c, but only for content added since the modification date of the file specficied in property lastrunfile")
   print("  lnc        Like nc, but only for content added since the modification date of the file specficied in property lastrunfile")
+  print("  lC         Like C, but only for content added since the modification date of the file specficied in property lastrunfile")
   print("  j          Query library by class (movies, tags, sets, tvshows, artists, albums or songs) with optional filter, return JSON results.")
   print("  J          Same as \"j\", but includes extra JSON audio/video fields as defined in properties file.")
   print("  jd, Jd     Functionality equivalent to j/J, but all URLs are decoded")
@@ -7350,7 +7734,7 @@ def usage(EXIT_CODE):
   print("  P          Prune (automatically remove) cached items that don't exist in the media library")
   print("  r          Reverse search to identify \"orphaned\" Thumbnail files that are not present in the texture cache database")
   print("  R          Same as \"r\" (reverse search) but automatically deletes \"orphaned\" Thumbnail files")
-  print("  imdb       Update IMDb fields (default: ratings and votes) on movies - pipe output into set to apply changes to media library. Specify alternate fields with @imdb.fields")
+  print("  imdb       Update IMDb fields (default: ratings and votes) on movies or tvshows - pipe output into set to apply changes to media library. Specify alternate or additional fields with @imdb.fields.movies and @imdb.fields.tvshows")
   print("  purge      Remove cached artwork with URLs containing specified patterns, with or without hash")
   print("  purgetest  Dry-run version of purge")
   print("  fixurls    Output new URLs for movies, sets and TV shows that have URLs containing both forward and backward slashes. Output suitable as stdin for set option")
@@ -7392,6 +7776,8 @@ def usage(EXIT_CODE):
   print("  playw      Play the specified item (on the specified player: null, default, #), and wait until playback ends")
   print("  stop       Stop playback of the specified player, or all currently active players")
   print("  pause      Toggle pause/playback of the specified player, or all currently active players")
+
+  print("  profiles   List available profiles")
 
   print("")
   print("  config     Show current configuration")
@@ -7450,7 +7836,7 @@ def checkConfig(option):
   optWeb = ["c", "C", "readfile"]
 
   # Socket (JSON RPC) access
-  optSocket = ["c", "C", "nc", "lc", "lnc", "j", "J", "jd", "Jd", "jr", "Jr",
+  optSocket = ["c", "C", "nc", "lc", "lnc", "lC", "j", "J", "jd", "Jd", "jr", "Jr",
                 "qa","qax","query", "p","P",
                 "remove", "vscan", "ascan", "vclean", "aclean",
                 "directory", "rdirectory", "sources",
@@ -7459,11 +7845,11 @@ def checkConfig(option):
                 "volume", "readfile", "notify",
                 "setsetting", "getsetting", "getsettings", "debugon", "debugoff",
                 "play", "playw", "stop", "pause",
-                "fixurls", "imdb"]
+                "fixurls", "imdb", "profiles"]
 
   # Database access (could be SQLite, could be JSON - needs to be determined later)
   optDb = ["s", "S", "x", "X", "Xd", "f", "F",
-           "c", "C", "nc", "lc", "lnc", "d",
+           "c", "C", "nc", "lc", "lnc", "lC", "d",
            "r", "R", "p", "P", "purge", "purgetest"]
 
   # These options require direct filesystem access
@@ -7514,7 +7900,7 @@ def checkConfig(option):
           "       enabled and running on the Kodi system you wish to connect.\n\n" \
           "       A connection cannot be established to the following webserver:\n" \
           "       %s:%s\n\n" \
-          "       Check settings in properties file %s\n" % (gConfig.XBMC_HOST, gConfig.WEB_PORT, gConfig.CONFIG_NAME)
+          "       Check settings in properties file %s\n" % (gConfig.KODI_HOST, gConfig.WEB_PORT, gConfig.CONFIG_NAME)
     gLogger.err(MSG)
     return False
 
@@ -7539,16 +7925,17 @@ def checkConfig(option):
         gLogger.log("JSON CAPABILITIES: %s" % gConfig.dumpJSONCapabilities())
 
       if gConfig.JSON_HAS_PROFILE_SUPPORT:
+        gConfig.ALL_PROFILES = getallprofiles(jcomms)
         gConfig.CURRENT_PROFILE = getcurrentprofile(jcomms)
         gLogger.log("CURRENT PROFILE: %s" % gConfig.CURRENT_PROFILE)
-        if gConfig.PROFILE_ENABLED and gConfig.CURRENT_PROFILE["name"] != gConfig.PROFILE_NAME:
+        if gConfig.PROFILE_ENABLED and gConfig.CURRENT_PROFILE["label"] != gConfig.PROFILE_NAME and option != "profiles":
           if not switchprofile(jcomms): return False
           jcomms = MyJSONComms(gConfig, gLogger)
 
-      REQUEST = {"method": "XBMC.GetInfoBooleans",
-                 "params": {"booleans": ["System.GetBool(pvrmanager.enabled)"]}}
+      REQUEST = {"method": "PVR.GetProperties",
+                 "params": {"properties": ["available"]}}
       data = jcomms.sendJSON(REQUEST, "libPVR", checkResult=False)
-      gConfig.HAS_PVR = ("result" in data and data["result"].get("System.GetBool(pvrmanager.enabled)", False))
+      gConfig.HAS_PVR = ("result" in data and data["result"].get("available", False))
 
     except socket.error:
       pass
@@ -7562,7 +7949,7 @@ def checkConfig(option):
           "            Allow programs on other systems to control Kodi\n\n" \
           "       A connection cannot be established to the following JSON-RPC server:\n" \
           "       %s:%s\n\n" \
-          "       Check settings in properties file %s\n" % (gConfig.XBMC_HOST, gConfig.RPC_PORT, gConfig.CONFIG_NAME)
+          "       Check settings in properties file %s\n" % (gConfig.KODI_HOST, gConfig.RPC_PORT, gConfig.CONFIG_NAME)
     gLogger.err(MSG)
     return False
 
@@ -7678,6 +8065,24 @@ def loadprofile(jcomms):
   else:
     return True
 
+def getallprofiles(jcomms):
+  REQUEST = {"method": "Profiles.GetProfiles", "params": {"properties": ["thumbnail", "lockmode" ]}}
+  if gConfig.JSON_HAS_PROFILE_DIRECTORY:
+    REQUEST["params"]["properties"].extend(["directory"])
+
+  data = jcomms.sendJSON(REQUEST, "libProfile", ignoreSocketError=True)
+
+  profiles = {}
+
+  if "result" in data:
+    master = [p for p in data["result"]["profiles"] if p["label"] == gConfig.PROFILE_MASTER]
+    master = None if master == [] else master[0]
+    for profile in data["result"]["profiles"]:
+      setProfileDirectory(master, profile)
+      profiles[profile["label"]] = profile
+
+  return profiles
+
 def getcurrentprofile(jcomms):
   REQUEST = {"method": "Profiles.GetCurrentProfile", "params": {"properties": ["thumbnail", "lockmode" ]}}
   if gConfig.JSON_HAS_PROFILE_DIRECTORY:
@@ -7686,21 +8091,36 @@ def getcurrentprofile(jcomms):
   data = jcomms.sendJSON(REQUEST, "libProfile", ignoreSocketError=True)
 
   if "result" in data:
-    profile = {}
-    profile["name"] = data["result"]["label"]
-    profile["lockmode"] = data["result"]["lockmode"]
-    profile["thumbnail"] = data["result"]["thumbnail"]
-    profile["directory"] = data["result"].get("directory", "")
+    profile = data["result"]
+    master = gConfig.ALL_PROFILES.get(gConfig.PROFILE_MASTER, gConfig.ALL_PROFILES.get("Master user", None))
+    setProfileDirectory(master, profile)
     return profile
   else:
     return gConfig.CURRENT_PROFILE
 
+def setProfileDirectory(master, profile):
+  if gConfig.JSON_HAS_PROFILE_DIRECTORY:
+    master_dir = master["directory"] if master else "special://masterprofile/"
+    if profile["directory"].startswith(master_dir):
+      mdir = MyUtility.PathToHostOS(master_dir)
+      pdir = MyUtility.PathToHostOS(profile["directory"])
+      profile["tc.profilepath"] = pdir[len(mdir):]
+    else:
+      profile["tc.profilepath"] = profile["directory"]
+  else:
+    profile["directory"] = ""
+    profile["tc.profilepath"] = gConfig.PROFILE_DIRECTORY
+
+  # Prefix with KODI_BASE if profile path is not an absolute path
+  if os.path.isabs(profile["tc.profilepath"]) == False:
+    profile["tc.profilepath"] =  os.path.join(gConfig.KODI_BASE, profile["tc.profilepath"])
+
 def switchprofile(jcomms):
-  if gConfig.CURRENT_PROFILE["name"] == gConfig.PROFILE_NAME:
+  if gConfig.CURRENT_PROFILE["label"] == gConfig.PROFILE_NAME:
     return True
   elif gConfig.PROFILE_AUTOLOAD:
-    gLogger.log("SWITCHING PROFILE FROM \"%s\" to \"%s\"" % (gConfig.CURRENT_PROFILE["name"], gConfig.PROFILE_NAME))
-    gLogger.progress("Switching profile from \"%s\" to \"%s\"..." % (gConfig.CURRENT_PROFILE["name"], gConfig.PROFILE_NAME))
+    gLogger.log("SWITCHING PROFILE FROM \"%s\" to \"%s\"" % (gConfig.CURRENT_PROFILE["label"], gConfig.PROFILE_NAME))
+    gLogger.progress("Switching profile from \"%s\" to \"%s\"..." % (gConfig.CURRENT_PROFILE["label"], gConfig.PROFILE_NAME))
 
     if jcomms is None: jcomms = MyJSONComms(gConfig, gLogger)
 
@@ -7716,7 +8136,7 @@ def switchprofile(jcomms):
         time.sleep(1.0)
         jcomms = MyJSONComms(gConfig, gLogger, connecttimeout=1.0)
         gConfig.CURRENT_PROFILE = getcurrentprofile(jcomms)
-        if gConfig.CURRENT_PROFILE["name"] == gConfig.PROFILE_NAME:
+        if gConfig.CURRENT_PROFILE["label"] == gConfig.PROFILE_NAME:
           gLogger.log("SWITCHED TO PROFILE: %s" % gConfig.CURRENT_PROFILE)
           if gConfig.PROFILE_WAIT != 0:
             gLogger.log("Waiting %d seconds for server to stabilise after loading profile..." % gConfig.PROFILE_WAIT)
@@ -7734,10 +8154,18 @@ def switchprofile(jcomms):
       return False
     gLogger.progress("")
   else:
-    gLogger.err("ERROR: Need to switch profiles from \"%s\" to \"%s\", but profile.autoload is not enabled" % (profile["name"], gConfig.PROFILE_NAME), newLine=True)
+    gLogger.err("ERROR: Need to switch profiles from \"%s\" to \"%s\", but profile.autoload is not enabled" % (gConfig.CURRENT_PROFILE["label"], gConfig.PROFILE_NAME), newLine=True)
     return False
 
   return True
+
+def listProfiles():
+  print("%s  %s  %-20s  %-50s  %s" % ("Active", "Lock", "Name", "Device Path", "Local Path"))
+  for p in gConfig.ALL_PROFILES:
+    profile = gConfig.ALL_PROFILES[p]
+    active = "Yes" if profile["label"] == gConfig.CURRENT_PROFILE["label"] else "No "
+    lockmode = "Yes" if profile["lockmode"] != 0 else "No "
+    print(" %s     %s  %-20s  %-50s  %s" % (active, lockmode, profile["label"], profile["directory"], profile["tc.profilepath"]))
 
 def checkUpdate(argv, forcedCheck=False):
   (remoteVersion, remoteHash) = getLatestVersion(argv)
@@ -7770,7 +8198,7 @@ def getLatestVersion(argv):
 
   # Construct "referer" to indicate usage:
   USAGE = "unknown"
-  if argv[0] in ["c", "C", "nc", "lc", "lnc"]:
+  if argv[0] in ["c", "C", "nc", "lc", "lnc", "lC"]:
     USAGE = "cache"
   elif argv[0] in ["j", "J", "jd", "Jd", "jr", "Jr"]:
     USAGE  = "dump"
@@ -7799,7 +8227,7 @@ def getLatestVersion(argv):
                    "duplicates", "fixurls", "imdb", "stats",
                    "input", "screenshot", "volume", "readfile", "notify",
                    "setsetting", "getsetting", "getsettings", "debugon", "debugoff",
-                   "version", "update", "fupdate", "config"]:
+                   "version", "update", "fupdate", "config", "profiles"]:
     USAGE  = argv[0]
 
   analytics_url = gConfig.ANALYTICS_GOOD
@@ -7833,7 +8261,7 @@ def getLatestVersion_ex(url, headers=None):
     else:
       response = urllib2.urlopen(url)
 
-    if sys.version_info >= (3, 0):
+    if MyUtility.isPython3:
       data = response.read().decode("utf-8")
     else:
       data = response.read()
@@ -7966,7 +8394,7 @@ def main(argv):
   elif argv[0] == "F" and len(argv) == 2:
     sqlExtract("STATS", filter=argv[1], silent=True)
 
-  elif argv[0] in ["c", "C", "nc", "lc", "lnc",
+  elif argv[0] in ["c", "C", "nc", "lc", "lnc", "lC",
                    "j", "J", "jd", "Jd", "jr", "Jr",
                    "qa", "qax", "query", "imdb"]:
     _stats  = False
@@ -7981,9 +8409,9 @@ def main(argv):
       _action = "cache"
       _stats  = True
 
-    _force      = True if argv[0] == "C" else False
+    _force      = True if argv[0] in ["C", "lC"] else False
     _rescan     = True if argv[0] == "qax" else False
-    _lastRun    = True if argv[0] in ["lc", "lnc"] else False
+    _lastRun    = True if argv[0] in ["lc", "lnc", "lC"] else False
     _nodownload = True if argv[0] in ["nc", "lnc"] else False
     _decode     = True if argv[0] in ["jd", "Jd", "jr", "Jr"] else False
     _ensure_ascii=False if argv[0] in ["jr", "Jr"] else True
@@ -7991,6 +8419,7 @@ def main(argv):
 
     _filter     = ""
     _query      = ""
+    _drop_items = {}
 
     if argv[0] != "query":
       _filter     = argv[2] if len(argv) > 2 else ""
@@ -8014,6 +8443,16 @@ def main(argv):
       if argv[1] == "video": _multi_call = multi_call_v
       if argv[1] == "all":   _multi_call = multi_call
 
+    if _action == "imdb" and _multi_call != []:
+      usage(1)
+
+    if _action == "imdb" and not gConfig.OMDB_API_KEY:
+      gLogger.err("ERROR: imdb functionality is no longer available without a valid API key.", newLine=True)
+      gLogger.err("Visit www.omdbapi.com to sign up for an API key, then add", newLine=True)
+      gLogger.err("  omdb.apikey=<yourkey>", newLine=True)
+      gLogger.err("to texturecache.cfg", newLine=True)
+      sys.exit(2)
+
     if _multi_call != [] and not gConfig.HAS_PVR:
       for item in ["pvr.tv", "pvr.radio"]:
         if item in _multi_call: _multi_call.remove(item)
@@ -8026,7 +8465,8 @@ def main(argv):
         jsonQuery(_action, mediatype=_media, filter=_filter,
                   force=_force, lastRun=_lastRun, nodownload=_nodownload,
                   rescan=_rescan, decode=_decode, ensure_ascii=_ensure_ascii,
-                  extraFields=_extraFields, query=_query)
+                  extraFields=_extraFields, query=_query, drop_items=_drop_items)
+      if _action == "cache": dump_drop_items(_drop_items)
       if _stats: TOTALS.libraryStats(multi=_multi_call, filter=_filter, lastRun=_lastRun, query=_query)
     else:
       usage(1)
@@ -8203,6 +8643,9 @@ def main(argv):
   elif argv[0] == "pause" and len(argv) in [1, 2]:
     playerPause(int(argv[1]) if len(argv) == 2 else None)
 
+  elif argv[0] == "profiles":
+    listProfiles()
+
   else:
     usage(1)
 
@@ -8212,6 +8655,9 @@ def main(argv):
   sys.exit(EXIT_CODE)
 
 if __name__ == "__main__":
+  #https://mail.python.org/pipermail/python-list/2015-October/697689.html - threading bug in Python2
+  tmp = datetime.datetime.strptime('01-01-1970', '%d-%m-%Y')
+
   try:
     stopped = threading.Event()
     main(sys.argv[1:])

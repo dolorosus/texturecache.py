@@ -33,7 +33,7 @@
 #
 ################################################################################
 
-#version 0.2.5
+#version 0.2.6
 
 from __future__ import print_function
 import sys, os, codecs, json, argparse, re, shutil
@@ -190,8 +190,6 @@ def itemList(aList):
   if aList:
     for aname in aList:
       (aname, value) = (aname, aname) if aname.find(":") == -1 else aname.split(":")
-      if aname == "clearlogo" and value == "clearlogo": value = "logo"
-      if aname == "discart" and value == "discart": value = "disc"
       newList.append({"type": aname, "suffix": value})
   return newList
 
@@ -426,7 +424,7 @@ def processItem(args, mediatype, media, download_items, showTitle=None, showPath
     for artitem in clist:
       if artitem in art:
         aname = art[artitem][8:-1]
-        if aname.startswith("http"):
+        if aname.startswith("http://") or aname.startswith("https://"):
           info(args, "**REMOTE FILE**", artitem, mediatitle, "Remote URL found", aname)
 
   return workitem
@@ -459,24 +457,34 @@ def processArtwork(args, mediatype, media, title, atype, filename, currentname, 
   # See if we already have a file of the desired artwork type, either in
   # jpg or png format. If found, use it as the source for this artwork type.
 
+  existinglocal = False
+
   # First, check folder using single-file naming convention (if enabled)
   if args.singlefolders:
     for source_type in [".png", ".jpg"]:
       target = "%s%s" % (pathname_single, source_type)
       if os.path.exists(target):
         debug2(atype, "Found pre-existing local file:", target)
-        target = pathToXBMC(target)
-        debug2(atype, "Converting local filename to Kodi path:", target)
-        return target
+        if args.overwrite:
+          existinglocal = True
+          break
+        else:
+          target = pathToXBMC(target)
+          debug2(atype, "Converting local filename to Kodi path:", target)
+          return target
 
-  # Next, check folder using multi-file naming convention
-  for source_type in [".png", ".jpg"]:
-    target = "%s%s" % (pathname_multi, source_type)
-    if os.path.exists(target):
-      debug2(atype, "Found pre-existing local file:", target)
-      target = pathToXBMC(target)
-      debug2(atype, "Converting local filename to Kodi path:", target)
-      return target
+  if not existinglocal:
+    # Next, check folder using multi-file naming convention
+    for source_type in [".png", ".jpg"]:
+      target = "%s%s" % (pathname_multi, source_type)
+      if os.path.exists(target):
+        debug2(atype, "Found pre-existing local file:", target)
+        if args.overwrite:
+          break
+        else:
+          target = pathToXBMC(target)
+          debug2(atype, "Converting local filename to Kodi path:", target)
+          return target
 
   # If we don't currently have a remote source, return nothing
   if not currentname: return None
@@ -508,7 +516,7 @@ def getImage(args, mediatype, media, title, atype, filename, source, target):
 
   # If it's not a remote file, maybe we just need to copy it from
   # the alt local folder to our output folder?
-  if LOCAL_ALT and not source.startswith("http://"):
+  if LOCAL_ALT and not source.startswith("http://") and not source.startswith("https://"):
     source = pathToAltLocal(source)
 
   # We've already failed to download this URL before, so fail quickly
@@ -517,8 +525,8 @@ def getImage(args, mediatype, media, title, atype, filename, source, target):
     warning(args, "**UNAVAILABLE**", atype, title, "Prior download failed: %4d" % NOT_AVAILABLE_CACHE[source], source)
     return None
 
-  # Try the filesystem copy if not http...
-  if not source.startswith("http://"):
+  # Try the filesystem copy if not http/https...
+  if not source.startswith("http://") and not source.startswith("https://"):
     newsource = source
     found_file = os.path.exists(newsource)
     debug2(atype, "Lookup non-HTTP file using current URL:", newsource, (" [%s]" % ("SUCCESS" if found_file else "FAIL")))
@@ -724,6 +732,9 @@ def init():
                       help="Don't display a warning for media files with a path that does not match \
                             that set by --prefix")
 
+  parser.add_argument("--overwrite", action="store_true", \
+                      help="Overwrite existing local artwork if the remote file download is successful")
+
   parser.add_argument("-a", "--artwork", nargs="+", metavar="TYPE", \
                       help="Artwork TYPE(s) for download, eg. \"--artwork  discart banner\" \
                             Specify TYPE:SUFFIX if SUFFIX differs from TYPE, \
@@ -732,7 +743,7 @@ def init():
 
   parser.add_argument("-c", "--check", nargs="+", metavar="TYPE", \
                       help="Check the named artwork TYPE(s) - or \"all\" - and warn if any internet \
-                            (http) URLs are detected")
+                            (http/https) URLs are detected")
 
   parser.add_argument("-s", "--season", nargs="*", metavar="TYPE", \
                       help="For TV shows, process season items (default: poster banner landscape)")
